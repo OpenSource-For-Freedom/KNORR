@@ -84,6 +84,12 @@ What comes out of the hold: **findings CSV**, **summary**, **SQLite ledger**. Th
 
 ---
 
+<p align="center">
+  <a href="https://opensourcemalware.com/my-submissions">
+    <img src="docs/osm-reports.png" alt="OSM Submissions" width="100%">
+  </a>
+</p>
+
 <div align="center">
 <sub>OpenSource-For-Freedom · MIT License</sub>
 </div>

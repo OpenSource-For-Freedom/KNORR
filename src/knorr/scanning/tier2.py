@@ -48,9 +48,10 @@ _TEXT_NAMES = {"config", "entrypoint", "start", "run", "cmd", "dockerfile"}
 # LOCUS without losing real payloads (the zenidine/nizadam perl-unicode FP).
 _IGNORE_LAYER_PATH = re.compile(
     r"(^|/)(usr/(share|lib|lib64|include|src)|lib|lib64|var/lib/dpkg|"
-    r"usr/local/lib|site-packages|dist-packages|node_modules/[^/]+/(docs?|test)|"
+    r"usr/local/lib|usr/local/go|site-packages|dist-packages|node_modules/[^/]+/(docs?|test)|"
     r"perl\d?|perl-base|unicore|man\d?)(/|$)"
-    r"|/doc/|copyright$|changelog(\.\w+)?$|(^|/)LICENSE|\.pod$|\.1$|\.3$|\.md$",
+    r"|/doc/|copyright$|changelog(\.\w+)?$|(^|/)LICENSE|\.pod$|\.1$|\.3$|\.md$"
+    r"|_test\.go$",
     re.I,
 )
 # Trivy pkg Type -> OSM ecosystem, for the SBOM match.

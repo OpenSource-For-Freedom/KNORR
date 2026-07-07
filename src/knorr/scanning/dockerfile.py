@@ -47,7 +47,7 @@ _DEFENSIVE = re.compile(
     r"payloadsallthethings|security|infosec|oscp|htb|tryhackme|vuln|forensic|sandbox|"
     r"detection|falco|osquery|\byara\b|scanner|antivirus|training|course|lab|demo|example|"
     r"dataset|benchmark|corpus|smelly|canary|test.?case|fixtures?|"
-    r"escalation|escape|boot.?2.?root|b00t.?2.?r00t|priv.?esc|kali|notes?|docs?|wiki|blog)",
+    r"escalation|escape|boot.?2.?root|b00t.?2.?r00t|priv.?esc|kali|\bnotes?\b|\bdocs?\b|wiki|blog)",
     re.I)
 # Content markers that identify AI-eval / benchmark data whose "attack" strings
 # are dataset content, not weaponized code (the terminal-bench canary FP).

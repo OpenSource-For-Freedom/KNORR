@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "knorr"
+version = "0.0.1"
+description = "Malicious Container Intelligence Engine (static analysis only)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+# Deliberately tiny runtime footprint: the core hunt needs only requests. The
+# heavy static analysis is shelled out to Trivy (a separate binary), never
+# reimplemented. No pydantic dependency, so the pipeline runs cleanly on 3.14.
+dependencies = [
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6",
+    "pytest>=8",
+]
+
+[project.scripts]
+knorr = "knorr.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"

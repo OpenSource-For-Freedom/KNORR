@@ -1,0 +1,29 @@
+# Secrets -- never commit
+.env
+.env.*
+!.env.example
+
+# The OSM write/submit path ships out-of-band (detection only in the public repo)
+src/knorr/osm_submit.py
+
+# Runtime state + evidence artifacts
+data/
+artifacts/
+*.sqlite
+*.sqlite-*
+*.db
+
+# Layer-unpack scratch / Trivy cache
+work/
+.trivycache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+.venv/
+venv/

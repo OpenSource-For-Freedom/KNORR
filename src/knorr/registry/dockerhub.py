@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from dataclasses import dataclass
 
 import requests
@@ -28,6 +29,13 @@ import requests
 from .. import config
 
 log = logging.getLogger(__name__)
+
+# 5xx is the registry's own transient failure, worth a short retry during an
+# unattended overnight run; 4xx (401/403/404/429) is a meaningful answer, never
+# retried here -- in particular 429 is handled by the caller via RateLimited,
+# since blindly retrying against an already-exhausted pull budget just burns
+# more of the retry budget for no gain.
+_TRANSIENT_STATUS = frozenset({500, 502, 503, 504})
 
 # Media types we accept for a manifest GET. Listing all four lets the registry
 # hand back either a single-arch manifest or a multi-arch index/list, which we
@@ -122,7 +130,7 @@ class DockerHubClient:
         self.token = config.DOCKERHUB_TOKEN if token is None else token
         # Registry profile (defaults to Docker Hub). The OCI Distribution flow is
         # identical across registries; only the host + token service differ, so
-        # the same client serves Quay, GHCR, etc. by swapping these.
+        # the same client serves GHCR (see ``for_ghcr``) by swapping these.
         self.registry = registry or config.DOCKERHUB_REGISTRY
         self.auth_url = auth_url or config.DOCKERHUB_AUTH_URL
         self.auth_service = auth_service or config.DOCKERHUB_AUTH_SERVICE
@@ -132,11 +140,15 @@ class DockerHubClient:
         self._bearer_cache: dict[str, str] = {}
 
     @classmethod
-    def for_quay(cls, session=None) -> DockerHubClient:
-        """A client pointed at Quay.io. Public read is anonymous (no token)."""
-        return cls(user="", token="", session=session, registry="quay.io",
-                   auth_url="https://quay.io/v2/auth", auth_service="quay.io",
-                   api_url="https://quay.io/api/v1")
+    def for_ghcr(cls, session=None, token: str | None = None) -> DockerHubClient:
+        """A client pointed at GHCR (ghcr.io). Same OCI token flow as Docker Hub;
+        public image PULLS are anonymous, but a GitHub token lifts anonymous rate
+        limits and is required for the separate package-listing discovery API
+        (see ``feeds/github.py``: needs the ``read:packages`` scope)."""
+        tok = config.GITHUB_TOKEN if token is None else token
+        return cls(user="token" if tok else "", token=tok or "", session=session,
+                   registry="ghcr.io", auth_url="https://ghcr.io/token",
+                   auth_service="ghcr.io", api_url="https://api.github.com")
 
     @staticmethod
     def _normalize_user(raw: str | None) -> str | None:
@@ -156,6 +168,33 @@ class DockerHubClient:
     def authenticated(self) -> bool:
         return bool(self.user and self.token)
 
+    def _get_retry(self, url: str, *, headers: dict | None = None,
+                   params: dict | None = None, max_attempts: int = 3,
+                   backoff: float = 0.5):
+        """GET with short exponential-backoff retry on transient failures
+        (network errors, 5xx). Never retries a 4xx -- that is a real answer,
+        not a blip. Overnight-run resilience: a single flaky response should
+        not drop an image from the hunt.
+        """
+        last_exc: requests.RequestException | None = None
+        for attempt in range(max_attempts):
+            try:
+                resp = self.session.get(url, headers=headers, params=params,
+                                        timeout=config.HTTP_TIMEOUT)
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt < max_attempts - 1:
+                    time.sleep(backoff * (2 ** attempt))
+                    continue
+                raise
+            if resp.status_code in _TRANSIENT_STATUS and attempt < max_attempts - 1:
+                log.warning("transient %s from %s; retrying (attempt %d/%d)",
+                            resp.status_code, url, attempt + 1, max_attempts)
+                time.sleep(backoff * (2 ** attempt))
+                continue
+            return resp
+        raise last_exc  # pragma: no cover -- unreachable, loop always returns or raises
+
     # --- auth ---------------------------------------------------------------
     def _bearer(self, repository: str) -> str:
         """Fetch (and cache) a pull-scoped Bearer token for one repository."""
@@ -169,18 +208,14 @@ class DockerHubClient:
         if self.authenticated:
             basic = base64.b64encode(f"{self.user}:{self.token}".encode()).decode()
             headers["Authorization"] = f"Basic {basic}"
-        resp = self.session.get(
-            self.auth_url, params=params, headers=headers,
-            timeout=config.HTTP_TIMEOUT,
-        )
+        resp = self._get_retry(self.auth_url, params=params, headers=headers)
         # Resilience: if authenticated auth fails (bad/expired token, malformed
         # login), fall back to an anonymous pull token rather than hard-stopping
         # the hunt. Public images still pull; only the budget drops to 100/6h.
         if resp.status_code != 200 and self.authenticated:
             log.warning("authenticated auth failed (%s) for %s; retrying anonymously",
                         resp.status_code, repository)
-            resp = self.session.get(
-                self.auth_url, params=params, timeout=config.HTTP_TIMEOUT)
+            resp = self._get_retry(self.auth_url, params=params)
         if resp.status_code != 200:
             raise RegistryError(f"auth failed ({resp.status_code}) for {repository}")
         body = resp.json()
@@ -194,7 +229,7 @@ class DockerHubClient:
         headers = {"Authorization": f"Bearer {self._bearer(repository)}"}
         if accept:
             headers["Accept"] = accept
-        return self.session.get(url, headers=headers, timeout=config.HTTP_TIMEOUT)
+        return self._get_retry(url, headers=headers)
 
     # --- registry (manifest + config only; NO layer pull) -------------------
     def _manifest_url(self, ref: ImageRef) -> str:
@@ -284,7 +319,7 @@ class DockerHubClient:
         ns, _, name = repository.partition("/")
         url = f"{self.api_url}/repositories/{ns}/{name}/"
         try:
-            resp = self.session.get(url, timeout=config.HTTP_TIMEOUT)
+            resp = self._get_retry(url)
         except requests.RequestException:
             return {}
         return resp.json() if resp.status_code == 200 else {}

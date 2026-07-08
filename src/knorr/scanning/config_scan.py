@@ -160,7 +160,8 @@ _RULES: tuple[tuple[str, str, int, re.Pattern[str]], ...] = (
         r"(>>?\s*/etc/cron|/var/spool/cron/|crontab\s+-|echo[^\n]*\|\s*crontab)")),
     ("persistence", "systemd-drop", 3, _r(r">>?\s*/etc/systemd/system/[\w@.\-]+\.service|systemctl\s+enable")),
     ("persistence", "rc-local", 3, _r(r">>?\s*/etc/rc\.local\b")),
-    ("persistence", "profile-inject", 3, _r(r">>?\s*(?:~|/root|/home/[\w.\-]+)/\.(?:bashrc|profile|bash_profile|zshrc)")),
+    ("persistence", "profile-inject", 3, _r(
+        r">>?\s*(?:~|/root|/home/[\w.\-]+)/\.(?:bashrc|profile|bash_profile|zshrc)")),
     ("persistence", "ssh-authkeys", 4, _r(r">>?\s*[^\n]*\.ssh/authorized_keys")),
     ("persistence", "ldso-preload", 5, _r(r"/etc/ld\.so\.preload")),
     ("persistence", "tunnel-tool", 3, _r(r"\b(?:ngrok|autossh|frpc|frps|chisel|gost|iodine|dnscat|reverse[-_]?ssh)\b")),

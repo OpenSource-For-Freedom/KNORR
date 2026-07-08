@@ -7,14 +7,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from knorr.scanning.dockerfile import (
-    DOCKERFILE_QUERIES,
-    DockerfileHit,
     _BENCHMARK_CONTENT,
+    DockerfileHit,
     is_defensive,
     is_dockerfile,
     scan_dockerfiles,
 )
-
 
 # ---------------------------------------------------------------------------
 # is_defensive

@@ -1,23 +1,17 @@
-"""Tests for Docker Hub + Quay discovery functions (all HTTP mocked)."""
+"""Tests for Docker Hub discovery functions (all HTTP mocked)."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from knorr.scanning.discovery import (
-    DEFAULT_SEARCH_TERMS,
-    TYPOSQUAT_TARGETS,
-    _QUAY_HREF,
     _one_edit,
     hub_search,
     publisher_images,
-    quay_publisher_images,
-    quay_search,
     typosquat_candidates,
 )
-
 
 # ---------------------------------------------------------------------------
 # _one_edit
@@ -34,32 +28,6 @@ from knorr.scanning.discovery import (
 ])
 def test_one_edit(a, b, expected):
     assert _one_edit(a, b) == expected
-
-
-# ---------------------------------------------------------------------------
-# _QUAY_HREF regex
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("href,ns,name", [
-    ("/repository/kinsing/malware",      "kinsing", "malware"),
-    ("/repository/ns/deep/path",         "ns",      "deep/path"),
-    ("/repository/a-b_c/img.name-1",     "a-b_c",   "img.name-1"),
-])
-def test_quay_href_regex_matches(href, ns, name):
-    m = _QUAY_HREF.match(href)
-    assert m is not None
-    assert m.group(1) == ns
-    assert m.group(2) == name
-
-
-@pytest.mark.parametrize("href", [
-    "/search/kinsing",
-    "/api/v1/repository",
-    "repository/kinsing/malware",  # missing leading slash
-    "",
-])
-def test_quay_href_regex_no_match(href):
-    assert _QUAY_HREF.match(href) is None
 
 
 # ---------------------------------------------------------------------------
@@ -214,150 +182,95 @@ def test_typosquat_skips_official():
 
 
 # ---------------------------------------------------------------------------
-# quay_search
+# hub_search pagination (the coverage-starvation fix: page 1 alone samples only
+# ~25 of what is often 500-1000+ matches for a common term like "xmrig")
 # ---------------------------------------------------------------------------
 
-def _make_quay_session(results: list[dict]) -> MagicMock:
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {"results": results}
+def _make_paged_session(pages: list[list[dict]]) -> MagicMock:
+    """A session whose .get() returns successive pages in order, one per call."""
+    responses = []
+    for page_results in pages:
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"results": page_results}
+        responses.append(resp)
     session = MagicMock()
-    session.get.return_value = resp
+    session.get.side_effect = responses
     session.headers = {}
     return session
 
 
-def test_quay_search_returns_candidates():
-    results = [
-        {"kind": "repository", "is_public": True, "href": "/repository/kinsing/miner"},
-    ]
-    session = _make_quay_session(results)
-    out = quay_search(("xmrig",), session=session)
-    assert len(out) == 1
-    assert out[0]["image"] == "kinsing/miner"
-    assert out[0]["publisher"] == "kinsing"
+def test_hub_search_requests_multiple_pages():
+    """pages=3 must issue 3 requests for a single term when each page is full."""
+    def _page(n: int) -> list[dict]:
+        return [{"repo_name": f"evil/p{n}-miner{i}", "is_official": False, "pull_count": 1}
+                for i in range(25)]
+    session = _make_paged_session([_page(1), _page(2), _page(3)])
+    out = hub_search(("xmrig",), per_term=25, pages=3, session=session)
+    assert session.get.call_count == 3
+    # 3 distinct pages of 25 unique names each -> 75 unique candidates
+    assert len({r["image"] for r in out}) == 75
 
 
-def test_quay_search_skips_non_repository_kind():
-    results = [
-        {"kind": "user", "is_public": True, "href": "/repository/kinsing/miner"},
-    ]
-    session = _make_quay_session(results)
-    out = quay_search(("xmrig",), session=session)
-    assert out == []
+def test_hub_search_stops_early_when_page_short():
+    """A page returning fewer than page_size results means the term is exhausted;
+    no further pages should be requested even if ``pages`` allows more."""
+    full_page = [{"repo_name": f"evil/miner{i}", "is_official": False, "pull_count": 1}
+                 for i in range(25)]
+    short_page = [{"repo_name": "evil/last", "is_official": False, "pull_count": 1}]
+    session = _make_paged_session([full_page, short_page])
+    out = hub_search(("xmrig",), per_term=25, pages=5, session=session)
+    assert session.get.call_count == 2  # stopped after the short page, not 5
+    assert "evil/last" in {r["image"] for r in out}
 
 
-def test_quay_search_skips_bad_href():
-    results = [
-        {"kind": "repository", "is_public": True, "href": "/search/something"},
-    ]
-    session = _make_quay_session(results)
-    out = quay_search(("xmrig",), session=session)
-    assert out == []
+def test_hub_search_default_pages_is_one():
+    """Backward-compatible default: pages=1 issues exactly one request per term."""
+    session = _make_hub_session([
+        {"repo_name": "evil/miner", "is_official": False, "pull_count": 1},
+    ])
+    hub_search(("xmrig",), session=session)
+    assert session.get.call_count == 1
 
 
-def test_quay_search_lowercases():
-    results = [
-        {"kind": "repository", "is_public": True, "href": "/repository/TeamTNT/Miner"},
-    ]
-    session = _make_quay_session(results)
-    out = quay_search(("xmrig",), session=session)
-    assert out[0]["image"] == "teamtnt/miner"
-
-
-def test_quay_search_deduplicates():
-    results = [
-        {"kind": "repository", "is_public": True, "href": "/repository/ns/img"},
-    ]
-    session = _make_quay_session(results)
-    out = quay_search(("xmrig", "monero"), session=session)
-    images = [r["image"] for r in out]
-    assert images.count("ns/img") == 1
-
-
-def test_quay_search_http_error():
-    resp = MagicMock()
-    resp.status_code = 503
-    session = MagicMock()
-    session.get.return_value = resp
-    session.headers = {}
-    out = quay_search(("xmrig",), session=session)
-    assert out == []
-
-
-def test_quay_search_network_error():
-    import requests
-    session = MagicMock()
-    session.get.side_effect = requests.RequestException("timeout")
-    session.headers = {}
-    out = quay_search(("xmrig",), session=session)
-    assert out == []
+def test_hub_search_pagination_requests_page_param():
+    """Each page request must carry the correct 'page' query parameter."""
+    full_page = [{"repo_name": f"evil/m{i}", "is_official": False, "pull_count": 1}
+                 for i in range(25)]
+    session = _make_paged_session([full_page, [{"repo_name": "evil/z", "is_official": False}]])
+    hub_search(("xmrig",), per_term=25, pages=2, session=session)
+    calls = session.get.call_args_list
+    assert calls[0].kwargs["params"]["page"] == 1
+    assert calls[1].kwargs["params"]["page"] == 2
 
 
 # ---------------------------------------------------------------------------
-# quay_publisher_images
+# publisher_images pagination (the owner pivot must enumerate a large publisher
+# fully, not just its first 100 repos)
 # ---------------------------------------------------------------------------
 
-def test_quay_publisher_images():
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {
-        "repositories": [
-            {"name": "miner1"},
-            {"name": "backdoor"},
-        ]
-    }
+def test_publisher_images_paginates_with_next():
+    page1 = {"results": [{"name": "a", "pull_count": 1}], "next": "http://next"}
+    page2 = {"results": [{"name": "b", "pull_count": 1}], "next": None}
+    resp1, resp2 = MagicMock(), MagicMock()
+    resp1.status_code, resp1.json.return_value = 200, page1
+    resp2.status_code, resp2.json.return_value = 200, page2
     session = MagicMock()
-    session.get.return_value = resp
+    session.get.side_effect = [resp1, resp2]
     session.headers = {}
-
-    out = quay_publisher_images("kinsing", session=session)
+    out = publisher_images("teamtnt", page_size=1, session=session)
     images = [r["image"] for r in out]
-    assert "kinsing/miner1" in images
-    assert "kinsing/backdoor" in images
-    assert all(r["publisher"] == "kinsing" for r in out)
+    assert images == ["teamtnt/a", "teamtnt/b"]
 
 
-def test_quay_publisher_images_http_error():
+def test_publisher_images_stops_at_max_pages():
+    page = {"results": [{"name": "x", "pull_count": 1}], "next": "http://next"}
     resp = MagicMock()
-    resp.status_code = 404
+    resp.status_code, resp.json.return_value = 200, page
     session = MagicMock()
-    session.get.return_value = resp
+    session.get.return_value = resp  # always has a "next", would loop forever
     session.headers = {}
-    out = quay_publisher_images("gone", session=session)
-    assert out == []
+    out = publisher_images("teamtnt", page_size=1, max_pages=3, session=session)
+    assert session.get.call_count == 3
+    assert len(out) == 3  # one repo per page, capped at max_pages
 
-
-def test_quay_publisher_images_lowercases():
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {"repositories": [{"name": "MyMiner"}]}
-    session = MagicMock()
-    session.get.return_value = resp
-    session.headers = {}
-    out = quay_publisher_images("EvilNS", session=session)
-    assert out[0]["image"] == "evilns/myminer"
-
-
-def test_quay_publisher_images_skips_nameless():
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {"repositories": [{"name": "ok"}, {"name": ""}]}
-    session = MagicMock()
-    session.get.return_value = resp
-    session.headers = {}
-    out = quay_publisher_images("ns", session=session)
-    images = [r["image"] for r in out]
-    assert "ns/ok" in images
-    assert "ns/" not in images
-
-
-def test_quay_publisher_images_source_term():
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {"repositories": [{"name": "img"}]}
-    session = MagicMock()
-    session.get.return_value = resp
-    session.headers = {}
-    out = quay_publisher_images("badns", session=session)
-    assert out[0]["source_term"] == "publisher:badns"

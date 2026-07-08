@@ -47,11 +47,24 @@ _TEXT_NAMES = {"config", "entrypoint", "start", "run", "cmd", "dockerfile"}
 # dropper scripts never live here, so skipping them removes the false-positive
 # LOCUS without losing real payloads (the zenidine/nizadam perl-unicode FP).
 _IGNORE_LAYER_PATH = re.compile(
-    r"(^|/)(usr/(share|lib|lib64|include|src)|lib|lib64|var/lib/dpkg|"
-    r"usr/local/lib|usr/local/go|site-packages|dist-packages|node_modules/[^/]+/(docs?|test)|"
+    # NOTE: "usr/local/X" is FHS-standard for locally-installed toolchains (a
+    # bundled Node/Python/Go under /usr/local rather than /usr) -- the earlier
+    # "usr/local/lib|usr/local/go"-only form missed usr/local/include, which let
+    # OpenSSL's generated fipskey.h (a hex FIPS key constant, not shellcode) slip
+    # through and false-positive on aquasec/codesec-remediation (score 50).
+    r"(^|/)(usr/(share|lib|lib64|include|src)|usr/local/(share|lib|lib64|include|src|go)|"
+    r"lib|lib64|var/lib/dpkg|site-packages|dist-packages|node_modules/[^/]+/(docs?|test)|"
     r"perl\d?|perl-base|unicore|man\d?)(/|$)"
     r"|/doc/|copyright$|changelog(\.\w+)?$|(^|/)LICENSE|\.pod$|\.1$|\.3$|\.md$"
-    r"|_test\.go$",
+    r"|_test\.go$"
+    # Security/APM vendor instrumentation configs legitimately NAME the malware
+    # families and attack patterns they detect (a WAF ruleset listing "mirai",
+    # "gafgyt", etc. as signatures to watch for) -- describing an attack is not
+    # committing one (the same principle as a comment never confirming, applied
+    # to a security tool's own detection-rule data). Observed on dd-trace's
+    # appsec/recommended.json inside aquasec/codesec-remediation.
+    r"|node_modules/(?:@datadog/|dd-trace/|@sentry/|newrelic/|elastic-apm-node/)"
+    r"|appsec/recommended\.json$",
     re.I,
 )
 # Trivy pkg Type -> OSM ecosystem, for the SBOM match.
@@ -86,37 +99,41 @@ def _is_texty(name: str, size: int) -> bool:
 
 
 def _scan_layer_tar(tar_path: Path, budget: dict) -> list[ConfigSignal]:
-    """Extract a gzip layer tar in-memory and scan text files. No disk writes."""
+    """Extract a gzip layer tar in-memory and scan text files. No disk writes.
+
+    The whole extraction runs inside one try/except so a corrupt or adversarial
+    layer (a truncated tar, a bad member mid-iteration) degrades to "no signals
+    from this layer" rather than crashing the hunt -- important for unattended
+    overnight runs pulling arbitrary untrusted images.
+    """
     signals: list[ConfigSignal] = []
     try:
-        tf = tarfile.open(tar_path, "r:*")
-    except (tarfile.TarError, OSError) as exc:
-        log.warning("cannot open layer tar: %s", exc)
-        return signals
-    with tf:
-        for member in tf:
-            if budget["files"] >= _MAX_FILES_SCANNED:
-                break
-            if not member.isfile():
-                continue
-            name = member.name.lstrip("./")
-            if ".." in Path(name).parts:  # traversal guard (we only read, but be safe)
-                continue
-            if _IGNORE_LAYER_PATH.search(name):  # OS/vendor docs -> prose false positives
-                continue
-            if not _is_texty(name, member.size) or member.size > _MAX_FILE_READ:
-                continue
-            budget["files"] += 1
-            try:
-                fh = tf.extractfile(member)
-                if fh is None:
+        with tarfile.open(tar_path, "r:*") as tf:
+            for member in tf:
+                if budget["files"] >= _MAX_FILES_SCANNED:
+                    break
+                if not member.isfile():
                     continue
-                text = fh.read().decode("utf-8", errors="ignore")
-            except (OSError, tarfile.TarError):
-                continue
-            for sig in scan_texts([text]):
-                # tag the evidence with the file it came from
-                signals.append(ConfigSignal(sig.category, sig.rule, f"{name}: {sig.evidence}"))
+                name = member.name.lstrip("./")
+                if ".." in Path(name).parts:  # traversal guard (we only read, but be safe)
+                    continue
+                if _IGNORE_LAYER_PATH.search(name):  # OS/vendor docs -> prose false positives
+                    continue
+                if not _is_texty(name, member.size) or member.size > _MAX_FILE_READ:
+                    continue
+                budget["files"] += 1
+                try:
+                    fh = tf.extractfile(member)
+                    if fh is None:
+                        continue
+                    text = fh.read().decode("utf-8", errors="ignore")
+                except (OSError, tarfile.TarError):
+                    continue
+                for sig in scan_texts([text]):
+                    # tag the evidence with the file it came from
+                    signals.append(ConfigSignal(sig.category, sig.rule, f"{name}: {sig.evidence}"))
+    except (tarfile.TarError, OSError) as exc:
+        log.warning("cannot open/read layer tar: %s", exc)
     return signals
 
 

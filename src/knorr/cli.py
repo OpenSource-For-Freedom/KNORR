@@ -93,22 +93,69 @@ def _cmd_hunt(args: argparse.Namespace) -> int:
     return run_hunt(args)
 
 
+def _finding_from_dockerfile_hit(hit):
+    """Map a DockerfileHit onto the same ImageFinding record the registry hunt
+    uses, so malicious Dockerfile code shows up in the SAME registry (and
+    dashboard) as malicious images, instead of only ever being printed to a
+    console and forgotten. Keyed ``github.com/<owner>/<repo>:<path>`` (not a
+    pullable OCI image; this artifact is a source file, not a container), with
+    the GitHub blob URL stashed in evidence for the dashboard link.
+    """
+    from .models import DetectionMethod, FindingStatus, ImageFinding
+
+    if hit.confirmed:
+        status = FindingStatus.CONFIRMED
+    elif hit.score >= 4:
+        status = FindingStatus.SCREENED
+    else:
+        status = FindingStatus.CANDIDATE
+    cats = sorted({s.split("/")[0] for s in hit.signals})
+    f = ImageFinding(
+        image=f"github.com/{hit.repo}:{hit.path}".casefold(),
+        reference=hit.path,
+        detection_method=DetectionMethod.DOCKERFILE_SCAN,
+        status=status,
+        score=hit.score,
+        signals=list(hit.signals),
+        publisher=hit.repo.split("/", 1)[0].casefold(),
+        tier=hit.tier,
+        confirming=list(hit.confirming),
+        reasoning=f"malicious Dockerfile code in {hit.repo}/{hit.path} "
+                 f"(facets: {', '.join(cats) or '-'})",
+        evidence={"dockerfile_url": hit.url, "path": hit.path},
+    )
+    return f
+
+
 def _cmd_dockerfiles(args: argparse.Namespace) -> int:
     """Scan GitHub for malicious Dockerfile CODE (non-crypto: revshell/C2/exfil/dropper)."""
+    from .db import Database
     from .feeds.github import GitHubClient
     from .scanning.dockerfile import scan_dockerfiles
 
     if not config.GITHUB_TOKEN:
         print("error: no GitHub token (set KN_GITHUB_TOKEN / GW_GITHUB_TOKEN).")
         return 2
-    print(f"scanning GitHub for malicious Dockerfiles (pace {args.pace}s/query)...\n")
-    hits = scan_dockerfiles(GitHubClient(), per_query=args.per_query, pace=args.pace,
-                            progress=lambda m: print(m, file=sys.stderr))
+    config.ensure_dirs()
+    db = Database.open(args.db)
+    known = {img[len("github.com/"):] for img in db.known_images() if img.startswith("github.com/")}
+    print(f"scanning GitHub for malicious Dockerfiles (pace {args.pace}s/query, "
+          f"{len(known)} file(s) already known)...\n")
+    run_id = f"dockerfiles-{args.per_query}-{args.pace}"
+    try:
+        hits = scan_dockerfiles(GitHubClient(), per_query=args.per_query, pace=args.pace,
+                                known=known, progress=lambda m: print(m, file=sys.stderr))
+        for hit in hits:
+            db.upsert_finding(_finding_from_dockerfile_hit(hit), run_id)
+    finally:
+        db.close()
+
     confirmed = [h for h in hits if h.confirmed]
     candidates = [h for h in hits if not h.confirmed]
     confirmed.sort(key=lambda h: -h.score)
     print(f"\n=== {len(confirmed)} CONFIRMED malicious Dockerfile(s), "
-          f"{len(candidates)} candidate(s) screened ===\n")
+          f"{len(candidates)} candidate(s) screened -- {len(hits)} persisted to the "
+          f"registry (db: {args.db}) ===\n")
     for h in confirmed:
         cats = sorted({s.split('/')[0] for s in h.signals})
         print(f"[{h.tier}]  {h.repo}/{h.path}")
@@ -128,6 +175,23 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_watch(args: argparse.Namespace) -> int:
+    """Long-running hunt loop with alerts on new confirmed findings."""
+    from .watch import watch
+
+    config.ensure_dirs()
+    webhook = config.ALERT_WEBHOOK
+    if not webhook:
+        print("note: no KN_ALERT_WEBHOOK/GW_DISCORD_WEBHOOK configured; "
+              "hunting will run but nothing will be alerted.")
+    registries = [r.strip() for r in args.registries.split(",") if r.strip()]
+    summary = watch(duration_seconds=args.duration, db_path=args.db, webhook=webhook,
+                    registries=registries, round_pause=args.interval)
+    json.dump(summary, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="knorr", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -141,8 +205,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     hunt = sub.add_parser("hunt", help="Full pipeline: discover -> Tier-1 -> Tier-2 -> registry.")
     hunt.add_argument("--db", type=Path, default=config.DB_PATH, help="SQLite path.")
-    hunt.add_argument("--registry", choices=["docker", "quay"], default="docker",
-                      help="Registry to hunt: docker (Docker Hub) or quay (Quay.io).")
+    hunt.add_argument("--registry", choices=["docker", "ghcr"], default="docker",
+                      help="Registry to hunt: docker (Docker Hub) or ghcr "
+                           "(GitHub Container Registry).")
+    hunt.add_argument("--ghcr-accounts", default=None,
+                      help="Comma-separated GitHub owners to pivot on for --registry ghcr "
+                           "(default: the built-in known-bad seed list).")
     hunt.add_argument("--limit", type=int, default=15,
                       help="Max images to Tier-2 pull+scan (protects the pull budget).")
     hunt.add_argument("--tier1-limit", type=int, default=120,
@@ -158,6 +226,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     dfiles = sub.add_parser("dockerfiles",
                             help="Scan GitHub for malicious Dockerfile code (non-crypto threats).")
+    dfiles.add_argument("--db", type=Path, default=config.DB_PATH,
+                       help="SQLite path (findings persist to the registry).")
     dfiles.add_argument("--per-query", type=int, default=15, help="Results per search query.")
     dfiles.add_argument("--pace", type=float, default=7.0, help="Seconds between code searches.")
     dfiles.set_defaults(func=_cmd_dockerfiles)
@@ -165,8 +235,19 @@ def build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="Serve the live threat-telemetry dashboard.")
     serve.add_argument("--db", type=Path, default=config.DB_PATH, help="SQLite path.")
     serve.add_argument("--host", default="127.0.0.1", help="Bind host.")
-    serve.add_argument("--port", type=int, default=8788, help="Bind port.")
+    serve.add_argument("--port", type=int, default=8789, help="Bind port.")
     serve.set_defaults(func=_cmd_serve)
+
+    watch_p = sub.add_parser(
+        "watch", help="Long-running hunt loop with alerts on new confirmed findings.")
+    watch_p.add_argument("--db", type=Path, default=config.DB_PATH, help="SQLite path.")
+    watch_p.add_argument("--duration", type=int, default=7200,
+                         help="Total seconds to run (default 7200 = 2h).")
+    watch_p.add_argument("--interval", type=float, default=600.0,
+                         help="Seconds to pause between rounds (default 600 = 10m).")
+    watch_p.add_argument("--registries", default="docker,ghcr",
+                         help="Comma-separated registries to rotate through each round.")
+    watch_p.set_defaults(func=_cmd_watch)
     return parser
 
 

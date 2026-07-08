@@ -1,6 +1,5 @@
 """Tests for data models (ImageFinding, DetectionMethod, FindingStatus)."""
 
-import pytest
 
 from knorr.models import DetectionMethod, FindingStatus, ImageFinding
 
@@ -41,7 +40,6 @@ def test_add_signals_sorted():
 
 def test_detection_method_values():
     assert DetectionMethod.OSM_CONTAINER == "osm_container"
-    assert DetectionMethod.QUAY_SEARCH if hasattr(DetectionMethod, "QUAY_SEARCH") else True
 
 
 def test_finding_status_values():

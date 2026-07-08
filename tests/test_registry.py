@@ -1,21 +1,20 @@
-"""Tests for parse_image, parse_ratelimit, and DockerHubClient (incl. Quay factory)."""
+"""Tests for parse_image, parse_ratelimit, and DockerHubClient."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from knorr.registry import (
     DockerHubClient,
     ImageRef,
-    ManifestResult,
     RateLimited,
     RegistryError,
     parse_image,
     parse_ratelimit,
 )
-
 
 # ---------------------------------------------------------------------------
 # parse_image
@@ -93,18 +92,6 @@ def test_client_normalize_user_extra_text(caplog):
     with caplog.at_level(logging.WARNING, logger="knorr.registry.dockerhub"):
         c = DockerHubClient(user="docker login myuser", token="")
     assert c.user == "myuser"
-
-
-# ---------------------------------------------------------------------------
-# DockerHubClient.for_quay factory
-# ---------------------------------------------------------------------------
-
-def test_for_quay_profile():
-    q = DockerHubClient.for_quay()
-    assert q.registry == "quay.io"
-    assert "quay.io" in q.auth_url
-    assert q.user == "" or q.user is None or not q.authenticated
-    assert not q.authenticated
 
 
 # ---------------------------------------------------------------------------
@@ -239,19 +226,81 @@ def test_resolve_manifest_multiarch_selects_amd64():
 
 
 # ---------------------------------------------------------------------------
-# DockerHubClient.for_quay bearer flow (different auth URL)
+# _get_retry: transient-failure resilience (overnight-run hardening). Retries
+# 5xx and network errors with backoff; never retries a 4xx (a real answer,
+# including 429, which the caller handles via RateLimited instead).
 # ---------------------------------------------------------------------------
 
-def test_quay_client_uses_correct_endpoints():
-    client = DockerHubClient.for_quay()
-    assert client.registry == "quay.io"
-    assert client.auth_url == "https://quay.io/v2/auth"
-    assert client.auth_service == "quay.io"
-    assert client.api_url == "https://quay.io/api/v1"
+def _resp(status: int, body: dict | None = None) -> MagicMock:
+    r = MagicMock()
+    r.status_code = status
+    r.json.return_value = body or {}
+    r.headers = {}
+    return r
 
 
-def test_quay_manifest_url():
-    client = DockerHubClient.for_quay()
-    ref = ImageRef("ns/repo", "latest")
-    url = client._manifest_url(ref)
-    assert url == "https://quay.io/v2/ns/repo/manifests/latest"
+def test_get_retry_succeeds_after_transient_5xx(monkeypatch):
+    import knorr.registry.dockerhub as dh_module
+    monkeypatch.setattr(dh_module.time, "sleep", lambda _s: None)  # no real delay in tests
+
+    session = MagicMock()
+    session.get.side_effect = [_resp(503), _resp(200, {"ok": True})]
+    client = DockerHubClient(user="", token="", session=session)
+    resp = client._get_retry("https://example/x")
+    assert resp.status_code == 200
+    assert session.get.call_count == 2
+
+
+def test_get_retry_exhausts_attempts_and_returns_last_5xx(monkeypatch):
+    import knorr.registry.dockerhub as dh_module
+    monkeypatch.setattr(dh_module.time, "sleep", lambda _s: None)
+
+    session = MagicMock()
+    session.get.side_effect = [_resp(503), _resp(503), _resp(503)]
+    client = DockerHubClient(user="", token="", session=session)
+    resp = client._get_retry("https://example/x", max_attempts=3)
+    assert resp.status_code == 503
+    assert session.get.call_count == 3  # gives up after max_attempts, does not loop forever
+
+
+def test_get_retry_never_retries_404():
+    session = MagicMock()
+    session.get.return_value = _resp(404)
+    client = DockerHubClient(user="", token="", session=session)
+    resp = client._get_retry("https://example/x")
+    assert resp.status_code == 404
+    assert session.get.call_count == 1  # a real answer, not retried
+
+
+def test_get_retry_never_retries_429():
+    session = MagicMock()
+    session.get.return_value = _resp(429)
+    client = DockerHubClient(user="", token="", session=session)
+    resp = client._get_retry("https://example/x")
+    assert resp.status_code == 429
+    assert session.get.call_count == 1  # handled by the caller via RateLimited, not blind retry
+
+
+def test_get_retry_recovers_from_network_exception(monkeypatch):
+    import knorr.registry.dockerhub as dh_module
+    monkeypatch.setattr(dh_module.time, "sleep", lambda _s: None)
+
+    session = MagicMock()
+    session.get.side_effect = [requests.RequestException("timeout"), _resp(200)]
+    client = DockerHubClient(user="", token="", session=session)
+    resp = client._get_retry("https://example/x")
+    assert resp.status_code == 200
+    assert session.get.call_count == 2
+
+
+def test_get_retry_raises_after_repeated_network_exceptions(monkeypatch):
+    import knorr.registry.dockerhub as dh_module
+    monkeypatch.setattr(dh_module.time, "sleep", lambda _s: None)
+
+    session = MagicMock()
+    session.get.side_effect = requests.RequestException("down")
+    client = DockerHubClient(user="", token="", session=session)
+    with pytest.raises(requests.RequestException):
+        client._get_retry("https://example/x", max_attempts=3)
+    assert session.get.call_count == 3
+

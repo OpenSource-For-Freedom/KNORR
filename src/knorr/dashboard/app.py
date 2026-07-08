@@ -6,7 +6,7 @@ uvicorn). Each request opens a short-lived DB so the page always reflects the
 latest committed hunt. The HTML/CSS/JS is a single self-contained page styled as
 an enterprise security console (sharp edges, restrained palette, dense tables).
 
-    knorr serve            # http://127.0.0.1:8788
+    knorr serve            # http://127.0.0.1:8789
 """
 
 from __future__ import annotations
@@ -17,10 +17,41 @@ from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from ..config import DB_PATH
+from ..config import DB_PATH, PROJECT_ROOT
 from ..db import Database
 
 log = logging.getLogger(__name__)
+
+# The README hero image, reused here as a subtle fixed background (a heavy
+# overlay keeps it from competing with the dense data panels sitting on top).
+_BRAND_IMAGE = PROJECT_ROOT / "docs" / "knorr.png"
+
+
+# Registries/sources this dashboard knows how to link out to. A bare "ns/repo"
+# image (no host prefix) is Docker Hub; anything else is keyed by its host
+# prefix. "github.com" findings are Dockerfile-in-git scans, not pullable
+# images (see cli.py's _finding_from_dockerfile_hit); their precise link is the
+# GitHub blob URL stashed in evidence, checked before this generic fallback.
+_REGISTRY_LINKS = {
+    "ghcr.io": lambda image: f"https://github.com/{image.split('/', 2)[1]}",
+    "github.com": lambda image: f"https://{image.split(':', 1)[0]}",
+}
+
+
+def _registry_of(image: str) -> str:
+    for host in _REGISTRY_LINKS:
+        if image.startswith(host + "/"):
+            return host
+    return "docker.io"
+
+
+def _link_for(image: str, evidence: dict) -> str:
+    if evidence.get("dockerfile_url"):
+        return evidence["dockerfile_url"]
+    for host, make in _REGISTRY_LINKS.items():
+        if image.startswith(host + "/"):
+            return make(image)
+    return f"https://hub.docker.com/r/{image}"
 
 
 def _rows(db: Database, status: str | None = None) -> list[dict]:
@@ -31,6 +62,7 @@ def _rows(db: Database, status: str | None = None) -> list[dict]:
         cur = db.conn.execute("SELECT * FROM image_findings ORDER BY score DESC, image")
     out = []
     for r in cur:
+        evidence = json.loads(r["evidence"] or "{}")
         out.append({
             "image": r["image"], "reference": r["reference"], "digest": r["digest"],
             "detection_method": r["detection_method"], "status": r["status"],
@@ -39,6 +71,8 @@ def _rows(db: Database, status: str | None = None) -> list[dict]:
             "signals": json.loads(r["signals"] or "[]"),
             "confirming": json.loads(r["confirming"] or "[]"),
             "reasoning": r["reasoning"], "osm_severity": r["osm_severity"],
+            "registry": _registry_of(r["image"]), "link": _link_for(r["image"], evidence),
+            "likely_tool": bool(evidence.get("likely_tool")),
         })
     return out
 
@@ -50,18 +84,24 @@ def _summary(db: Database) -> dict:
     screened = [r for r in rows if r["status"] == "screened"]
     cat_counter: Counter = Counter()
     method_counter: Counter = Counter()
+    registry_counter: Counter = Counter()
     for r in confirmed:
         method_counter[r["detection_method"]] += 1
+        registry_counter[r["registry"]] += 1
         for sig in r["signals"]:
             cat_counter[sig.split("/", 1)[0]] += 1
     novel = [r for r in confirmed
-             if r["detection_method"] in ("hub_search", "typosquat", "publisher_pivot")]
+             if r["detection_method"] in ("hub_search", "typosquat", "publisher_pivot",
+                                          "dockerfile_scan")]
+    tools = [r for r in confirmed if r["likely_tool"]]
     runs = list(db.conn.execute("SELECT * FROM runs ORDER BY started_at DESC LIMIT 1"))
     return {
         "totals": {"confirmed": len(confirmed), "removed": len(removed),
-                   "screened": len(screened), "candidates": len(rows), "novel": len(novel)},
+                   "screened": len(screened), "candidates": len(rows), "novel": len(novel),
+                   "tools": len(tools)},
         "by_category": cat_counter.most_common(),
         "by_method": method_counter.most_common(),
+        "by_registry": registry_counter.most_common(),
         "run": runs[0]["run_id"] if runs else "",
         "counts": json.loads(runs[0]["counts"]) if runs and runs[0]["counts"] else {},
     }
@@ -88,6 +128,12 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/":
             self._send(_HTML.encode("utf-8"), "text/html; charset=utf-8")
             return
+        if path == "/knorr.png":
+            if _BRAND_IMAGE.is_file():
+                self._send(_BRAND_IMAGE.read_bytes(), "image/png")
+            else:
+                self._send(b"", "image/png", 404)
+            return
         if path.startswith("/api/"):
             db = Database.open(self.db_path)
             try:
@@ -107,7 +153,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(b"not found", "text/plain", 404)
 
 
-def serve(db_path=DB_PATH, host: str = "127.0.0.1", port: int = 8788) -> None:
+def serve(db_path=DB_PATH, host: str = "127.0.0.1", port: int = 8789) -> None:
     _Handler.db_path = db_path
     httpd = ThreadingHTTPServer((host, port), _Handler)
     log.info("dashboard serving on http://%s:%s", host, port)
@@ -123,7 +169,7 @@ _HTML = r"""<!doctype html>
 <title>Knorr - Container Threat Registry</title>
 <style>
 :root{
-  --canvas:#f3f5f8;--surface:#ffffff;--surface-2:#f8fafc;--zebra:#fbfcfe;
+  --canvas:#f3f5f8;--canvas-rgb:243,245,248;--surface:#ffffff;--surface-2:#f8fafc;--zebra:#fbfcfe;
   --border:#e2e7ee;--border-2:#ced6e0;--hair:#eef1f5;
   --text:#182430;--text-2:#57667a;--text-3:#8592a4;
   --brand:#1c548f;--brand-2:#e8f0f8;
@@ -132,14 +178,19 @@ _HTML = r"""<!doctype html>
   --mono:ui-monospace,"SF Mono","Cascadia Code",Consolas,monospace;
 }
 @media (prefers-color-scheme:dark){:root{
-  --canvas:#0d1219;--surface:#131a23;--surface-2:#0f161e;--zebra:#141c26;
+  --canvas:#0d1219;--canvas-rgb:13,18,25;--surface:#131a23;--surface-2:#0f161e;--zebra:#141c26;
   --border:#232d3a;--border-2:#303c4b;--hair:#1b232e;
   --text:#d7dee7;--text-2:#94a1b0;--text-3:#66717f;
   --brand:#4f9bd8;--brand-2:#16222f;
   --crit:#e05669;--crit-bg:#2a1519;--high:#d29a44;--high-bg:#241c10;
 }}
 *{box-sizing:border-box}
-body{margin:0;font-family:var(--sans);color:var(--text);background:var(--canvas);
+body{margin:0;font-family:var(--sans);color:var(--text);
+  background-color:var(--canvas);
+  background-image:linear-gradient(rgba(var(--canvas-rgb),.94),rgba(var(--canvas-rgb),.94)),
+    url('/knorr.png');
+  background-size:auto,cover;background-position:center,center top;
+  background-attachment:fixed,fixed;background-repeat:no-repeat,no-repeat;
   font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
 a{color:var(--brand);text-decoration:none}a:hover{text-decoration:underline}
 a:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
@@ -204,7 +255,7 @@ tbody tr:nth-child(even){background:var(--zebra)}tbody tr:hover{background:var(-
     <rect x="1" y="10" width="14" height="3" fill="#fff" opacity=".4"/></svg></span>
   <span class="brand">Kn&ouml;rr</span><span class="divider"></span>
   <span class="desc">Container Threat Registry</span>
-  <div class="env"><span class="badge">registry: Docker Hub</span>
+  <div class="env"><span class="badge" id="registries">registries: Docker Hub</span>
     <span class="run" id="run"></span></div>
 </div>
 <div class="kpis" id="kpis"></div>
@@ -217,8 +268,9 @@ tbody tr:nth-child(even){background:var(--zebra)}tbody tr:hover{background:var(-
   </div>
   <div class="panel"><div class="phead"><h2>Confirmed detections</h2>
     <span class="meta" id="cmeta"></span></div>
-    <div class="tblwrap"><table><thead><tr><th>Severity</th><th>Image</th><th>Rule tier</th>
-      <th class="num">Score</th><th>Threat</th><th>Source</th><th>Signals</th></tr></thead>
+    <div class="tblwrap"><table><thead><tr><th>Severity</th><th>Image</th><th>Registry</th>
+      <th>Rule tier</th><th class="num">Score</th><th>Threat</th><th>Source</th>
+      <th>Signals</th></tr></thead>
       <tbody id="rows"></tbody></table></div></div>
   <div class="panel"><div class="phead"><h2>Removed / taken down</h2>
     <span class="meta" id="rmeta"></span></div><div class="removed" id="removed"></div></div>
@@ -231,17 +283,21 @@ const COL={cryptomining:"#b5731a",reverse_shell:"#b3283a",c2:"#a02947",exfiltrat
   credential_access:"#9a6712",obfuscation:"#5a5296",persistence:"#2a6386",rootkit:"#a23a63",
   defense_evasion:"#6b7683",container_escape:"#9a5a2a",malware_family:"#8f1f34",download_exec:"#8a7d1f",
   recon:"#6b7683",lateral_movement:"#3c6f8c"};
-const NOVEL=new Set(["hub_search","typosquat","publisher_pivot"]);
+const NOVEL=new Set(["hub_search","typosquat","publisher_pivot","dockerfile_scan"]);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 function bar(nm,v,mx,c){const p=mx?Math.max(3,Math.round(v/mx*100)):0;
   return `<div class="bar-row"><div class="nm">${esc(nm.replace(/_/g," "))}</div>
    <div class="tr"><div class="fl" style="width:${p}%;background:${c}"></div></div><div class="v">${v}</div></div>`}
+const REGISTRY_LABEL={"docker.io":"Docker Hub","ghcr.io":"GHCR","github.com":"GitHub (Dockerfile)"};
 async function load(){
   const s=await (await fetch('/api/summary')).json(); const t=s.totals;
   document.getElementById('run').innerHTML=`run <b>${esc(s.run||'-')}</b><br>static analysis &middot; images never executed`;
+  document.getElementById('registries').textContent='registries: '+
+    (s.by_registry.length?s.by_registry.map(([r,n])=>`${REGISTRY_LABEL[r]||r} (${n})`).join(', ')
+      :'Docker Hub');
   document.getElementById('kpis').innerHTML=[["crit","Confirmed",t.confirmed],["brand","Novel / beyond OSM",t.novel],
     ["","Promoted to Tier 2",t.screened],["","Removed / delisted",t.removed],
-    ["","Candidates screened",t.candidates],["","Threat facets",s.by_category.length]]
+    ["","Candidates screened",t.candidates],["","Tools flagged",t.tools]]
     .map(([c,l,n])=>`<div class="kpi ${c}"><div class="n">${n}</div><div class="l">${esc(l)}</div></div>`).join("");
   const cmx=Math.max(1,...s.by_category.map(x=>x[1]));
   document.getElementById('cats').innerHTML=s.by_category.map(([c,n])=>bar(c,n,cmx,COL[c]||"var(--brand)")).join("")||'<span class="note">no data</span>';
@@ -254,14 +310,16 @@ async function load(){
     const A=(x.tier||"").startsWith("A");
     const sev=A?`<span class="sev crit"><span class="dot"></span>CRITICAL</span>`:`<span class="sev high"><span class="dot"></span>HIGH</span>`;
     const nv=NOVEL.has(x.detection_method)?`<span class="tag">novel</span>`:"";
+    const tool=x.likely_tool?`<span class="tag" style="color:var(--text-2);border-color:var(--border-2)">tool</span>`:"";
     const sig=(x.signals||[]).slice(0,6).map(g=>`<span class="chip">${esc(g)}</span>`).join("")+((x.signals||[]).length>6?` <span class="more">+${x.signals.length-6}</span>`:"");
     return `<tr><td>${sev}</td>
-      <td class="img"><a href="https://hub.docker.com/r/${esc(x.image)}" target="_blank" rel="noopener">${esc(x.image)}</a>${nv}
+      <td class="img"><a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.image)}</a>${nv}${tool}
       ${x.attribution?`<span class="attr">campaign: ${esc(x.attribution)}</span>`:""}</td>
+      <td class="src">${esc(REGISTRY_LABEL[x.registry]||x.registry)}</td>
       <td class="tierlbl">${esc(x.tier||"")}</td><td class="num score">${x.score}</td>
       <td class="threat">${esc((x.tier||"").split(":")[1]||"")}</td>
       <td class="src">${esc(x.detection_method)}</td><td>${sig}</td></tr>`}).join("")
-    ||'<tr><td colspan="7" class="note">no confirmed findings yet - run a hunt</td></tr>';
+    ||'<tr><td colspan="8" class="note">no confirmed findings yet - run a hunt</td></tr>';
   const rem=await (await fetch('/api/removed')).json();
   document.getElementById('rmeta').textContent=`${rem.length} OSM-flagged images returned 401/404 at pull`;
   document.getElementById('removed').innerHTML=rem.length?rem.map(x=>`<span class="r">${esc(x.image)}</span>`).join("   "):"none";

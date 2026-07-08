@@ -39,17 +39,20 @@ from .scanning.discovery import (
     DEFAULT_SEARCH_TERMS,
     hub_search,
     publisher_images,
-    quay_publisher_images,
-    quay_search,
     typosquat_candidates,
 )
 from .scanning.iocs import extract_iocs, pool_owned_by_publisher
 
 log = logging.getLogger(__name__)
 
-# Registry host prefixes we key non-Docker-Hub findings under (so a quay ns/repo
+# Registry host prefixes we key non-Docker-Hub findings under (so a ghcr ns/repo
 # never collides with a Docker Hub ns/repo, and the pull path knows the host).
-_REGISTRY_PREFIXES = ("quay.io/", "ghcr.io/")
+_REGISTRY_PREFIXES = ("ghcr.io/",)
+
+# Seed accounts for the GHCR account pivot: GitHub owners we ourselves proved
+# authored malicious code (a reverse shell welded into their own Dockerfile, via
+# the `knorr dockerfiles` scanner), not just aggregators of other people's files.
+GHCR_SEED_ACCOUNTS = ("DVKunion", "CKmaenn", "wearenotpoliticallycorrect")
 
 
 def _pull_ref(image: str, reference: str) -> ImageRef:
@@ -83,6 +86,20 @@ def _capture_iocs(f, extra_texts: list[str] | None = None) -> None:
                         "likely a personal miner tool rather than cryptojacking")
 
 
+def _is_known_good_publisher(f: ImageFinding) -> bool:
+    """True if the image's publisher/namespace is a known-good vendor.
+
+    Prevents auto-confirming a legitimate vendor's own tooling or test fixtures
+    (a security company's demo image, a miner project's own upstream repo) --
+    the exact shape of two real incidents in one night (aquasec, xmrig). Checked
+    against both the tracked publisher field and the image's own namespace, so
+    it still catches a case where publisher wasn't populated by discovery.
+    """
+    namespace = f.image.split("/", 1)[0] if "/" in f.image else f.image
+    candidates = {(f.publisher or "").casefold(), namespace.casefold()}
+    return bool(candidates & config.KNOWN_GOOD_PUBLISHERS)
+
+
 def _attribution(tags: list[str]) -> str | None:
     lower = [t.casefold() for t in tags]
     for camp in _CAMPAIGN_TAGS:
@@ -92,81 +109,125 @@ def _attribution(tags: list[str]) -> str | None:
 
 
 def _discover(sources: set[str], osm: OsmClient, tier1_limit: int,
-              confirmed_publishers: set[str] | None = None) -> dict[str, ImageFinding]:
+              confirmed_publishers: set[str] | None = None,
+              known: set[str] | None = None) -> dict[str, ImageFinding]:
+    """Discover candidates, EXCLUDING images already in the registry (``known``).
+
+    Without this exclusion every round rediscovers the same ~1000+ candidates in
+    the same order, and since Tier-1 always screens ``items[:tier1_limit]`` from
+    the FRONT of the list, a low/moderate budget never reaches sources appended
+    later -- in practice the publisher pivot (our highest-yield source: it found
+    isukim/cryptominer and donafro/monero) sat past position 686 in a 1103-item
+    list and was never reached even once across a full 2-hour, 12-round run.
+
+    Two fixes here: (1) skip anything already in ``known`` so the list is small
+    and 100% fresh candidates, and (2) put the publisher pivot right after the
+    OSM seed (proven, compounding, highest precision) instead of last, so a
+    budget-constrained round still reaches it before the large, lower-precision
+    hub_search set.
+    """
     candidates: dict[str, ImageFinding] = {}
+    known = known or set()
     # Compounding owner pivot: every publisher we already proved malicious is
     # re-enumerated for siblings, so the registry finds more each run.
     bad_publishers: set[str] = set(confirmed_publishers or set())
+
+    def _add(image: str, **kwargs) -> None:
+        if image.casefold() in known:
+            return
+        candidates.setdefault(image, ImageFinding(image=image, **kwargs))
 
     if "osm_container" in sources:
         targets = osm.container_targets()
         _mon(f"  osm_container: {len(targets)} OSM-flagged image(s)")
         for t in targets:
             bad_publishers.add(t["image"].split("/", 1)[0])
-            candidates.setdefault(t["image"], ImageFinding(
-                image=t["image"], reference=t.get("reference") or "latest",
-                detection_method=DetectionMethod.OSM_CONTAINER,
-                publisher=t["image"].split("/", 1)[0],
-                osm_severity=t.get("severity"), osm_tags=t.get("tags") or [],
-                attribution=_attribution(t.get("tags") or []),
-                reasoning=f"OSM-flagged malicious image: {t.get('threat','')[:180]}"))
+            _add(t["image"], reference=t.get("reference") or "latest",
+                 detection_method=DetectionMethod.OSM_CONTAINER,
+                 publisher=t["image"].split("/", 1)[0],
+                 osm_severity=t.get("severity"), osm_tags=t.get("tags") or [],
+                 attribution=_attribution(t.get("tags") or []),
+                 reasoning=f"OSM-flagged malicious image: {t.get('threat','')[:180]}")
 
-    # Novel discovery (search + typosquat) is screened right after the OSM set,
-    # BEFORE the publisher pivot, so a tier1 cap never crowds out images OSM does
-    # not already have (the whole point is contributing novel findings).
+    # Publisher pivot SECOND (highest yield, compounding, proven-bad accounts),
+    # so a budget-constrained round reaches it before the much larger and
+    # lower-precision hub_search/typosquat sets ever get a chance to crowd it out.
+    if "publisher" in sources and bad_publishers:
+        pivot_new = 0
+        for ns in sorted(bad_publishers):
+            for r in publisher_images(ns):
+                before = len(candidates)
+                _add(r["image"], detection_method=DetectionMethod.PUBLISHER_PIVOT,
+                     publisher=ns, pull_count=r.get("pull_count"),
+                     reasoning=f"other image under proven-bad publisher {ns}")
+                pivot_new += len(candidates) - before
+        _mon(f"  publisher pivot: {pivot_new} new candidate(s) across "
+             f"{len(bad_publishers)} bad publisher(s)")
+
     if "search" in sources:
-        hits = hub_search(DEFAULT_SEARCH_TERMS)
-        _mon(f"  hub search: {len(hits)} candidate(s) across {len(DEFAULT_SEARCH_TERMS)} terms")
+        hits = hub_search(DEFAULT_SEARCH_TERMS, pages=4)
+        _mon(f"  hub search: {len(hits)} candidate(s) across {len(DEFAULT_SEARCH_TERMS)} terms "
+             f"(paginated)")
         for r in hits:
-            candidates.setdefault(r["image"], ImageFinding(
-                image=r["image"], detection_method=DetectionMethod.HUB_SEARCH,
-                publisher=r["publisher"], pull_count=r.get("pull_count"),
-                reasoning=f"surfaced by Docker Hub search '{r.get('source_term')}'"))
+            _add(r["image"], detection_method=DetectionMethod.HUB_SEARCH,
+                 publisher=r["publisher"], pull_count=r.get("pull_count"),
+                 reasoning=f"surfaced by Docker Hub search '{r.get('source_term')}'")
 
     if "typosquat" in sources:
         hits = typosquat_candidates()
         _mon(f"  typosquat: {len(hits)} impersonation candidate(s)")
         for r in hits:
-            candidates.setdefault(r["image"], ImageFinding(
-                image=r["image"], detection_method=DetectionMethod.TYPOSQUAT,
-                publisher=r["publisher"], pull_count=r.get("pull_count"),
-                reasoning=f"name impersonates Official image ({r.get('source_term')})"))
-
-    if "publisher" in sources and bad_publishers:
-        for ns in sorted(bad_publishers):
-            for r in publisher_images(ns):
-                candidates.setdefault(r["image"], ImageFinding(
-                    image=r["image"], detection_method=DetectionMethod.PUBLISHER_PIVOT,
-                    publisher=ns, pull_count=r.get("pull_count"),
-                    reasoning=f"other image under OSM-flagged publisher {ns}"))
-        _mon(f"  publisher pivot: enumerated {len(bad_publishers)} bad publisher(s)")
+            _add(r["image"], detection_method=DetectionMethod.TYPOSQUAT,
+                 publisher=r["publisher"], pull_count=r.get("pull_count"),
+                 reasoning=f"name impersonates Official image ({r.get('source_term')})")
 
     return candidates
 
 
-def _discover_quay(sources: set[str], db: Database) -> dict[str, ImageFinding]:
-    """Quay.io discovery (public, no key). Findings keyed under ``quay.io/``."""
+def _discover_ghcr(accounts, db: Database, known: set[str] | None = None,
+                   sources: set[str] | None = None) -> dict[str, ImageFinding]:
+    """GHCR discovery: account pivot (packages under known-bad GitHub owners) +
+    image-reference search (GHCR has no keyword-search API, so this mines
+    GitHub code for ``ghcr.io/<owner>/<image>`` references naming a malicious
+    term instead -- the GHCR analog of ``hub_search``).
+
+    The account pivot needs GITHUB_TOKEN to carry ``read:packages``; it
+    degrades to 0 candidates (with a clear warning) if it does not, rather
+    than failing the hunt.
+    """
+    from .feeds.github import GitHubClient
+    from .scanning.ghcr_refs import search_ghcr_image_refs
     candidates: dict[str, ImageFinding] = {}
+    known = known or set()
+    sources = sources or {"publisher"}
+    gh = GitHubClient()
+
     if "search" in sources:
-        hits = quay_search(DEFAULT_SEARCH_TERMS)
-        _mon(f"  quay search: {len(hits)} candidate(s) across {len(DEFAULT_SEARCH_TERMS)} terms")
+        hits = search_ghcr_image_refs(gh, known=known, progress=_mon)
+        _mon(f"  ghcr image-ref search: {len(hits)} candidate(s)")
         for r in hits:
-            img = f"quay.io/{r['image']}"
-            candidates.setdefault(img, ImageFinding(
-                image=img, detection_method=DetectionMethod.HUB_SEARCH, publisher=r["publisher"],
-                reasoning=f"surfaced by Quay search '{r.get('source_term')}'"))
+            candidates.setdefault(r["image"], ImageFinding(
+                image=r["image"], detection_method=DetectionMethod.HUB_SEARCH,
+                publisher=r["publisher"],
+                reasoning=f"ghcr.io reference found in GitHub code, naming '{r['source_term']}'"))
+
     if "publisher" in sources:
-        quay_pubs = {row["publisher"] for row in db.conn.execute(
+        accounts = set(accounts) | {row["publisher"] for row in db.conn.execute(
             "SELECT DISTINCT publisher FROM image_findings WHERE status='confirmed' "
-            "AND image LIKE 'quay.io/%' AND publisher IS NOT NULL") if row["publisher"]}
-        for ns in sorted(quay_pubs):
-            for r in quay_publisher_images(ns):
-                img = f"quay.io/{r['image']}"
-                candidates.setdefault(img, ImageFinding(
-                    image=img, detection_method=DetectionMethod.PUBLISHER_PIVOT, publisher=ns,
-                    reasoning=f"other image under proven-bad Quay publisher {ns}"))
-        if quay_pubs:
-            _mon(f"  quay publisher pivot on {len(quay_pubs)} prior bad publisher(s)")
+            "AND image LIKE 'ghcr.io/%' AND publisher IS NOT NULL") if row["publisher"]}
+        pivot_new = 0
+        for owner in sorted(accounts):
+            names = gh.account_container_packages(owner)
+            for name in names:
+                img = f"ghcr.io/{owner}/{name}".casefold()
+                if img not in known and img not in candidates:
+                    candidates[img] = ImageFinding(
+                        image=img, detection_method=DetectionMethod.PUBLISHER_PIVOT,
+                        publisher=owner,
+                        reasoning=f"container package under known-bad GitHub account {owner}")
+                    pivot_new += 1
+        _mon(f"  ghcr account pivot: {pivot_new} new candidate(s) across "
+             f"{len(accounts)} account(s)")
     return candidates
 
 
@@ -177,7 +238,7 @@ def run_hunt(args) -> int:
     # allow "osm_package" alias but the SBOM set is loaded on demand below
     db = Database.open(args.db)
     db.start_run(run_id, datetime.now(UTC).isoformat())
-    client = DockerHubClient.for_quay() if registry == "quay" else DockerHubClient()
+    client = DockerHubClient.for_ghcr() if registry == "ghcr" else DockerHubClient()
     osm = OsmClient()
 
     _mon(f"=== knorr hunt {run_id}  [registry: {registry}] ===")
@@ -185,14 +246,20 @@ def run_hunt(args) -> int:
          f" | sources: {sorted(sources)} | tier2: {args.scan} (limit {args.limit})")
 
     _mon("[1/4] discover")
-    if registry == "quay":
-        candidates = _discover_quay(sources, db)
+    known = db.known_images()
+    _mon(f"  {len(known)} image(s) already in the registry (excluded from re-discovery)")
+    if registry == "ghcr":
+        raw_accounts = getattr(args, "ghcr_accounts", None)
+        accounts = ([a.strip() for a in raw_accounts.split(",") if a.strip()]
+                    if raw_accounts else GHCR_SEED_ACCOUNTS)
+        candidates = _discover_ghcr(accounts, db, known=known, sources=sources)
     else:
         confirmed_pubs = db.confirmed_publishers()
         if confirmed_pubs:
             _mon(f"  compounding pivot on {len(confirmed_pubs)} previously-confirmed publisher(s)")
-        candidates = _discover(sources, osm, args.tier1_limit, confirmed_publishers=confirmed_pubs)
-    _mon(f"  -> {len(candidates)} unique candidate image(s)")
+        candidates = _discover(sources, osm, args.tier1_limit,
+                               confirmed_publishers=confirmed_pubs, known=known)
+    _mon(f"  -> {len(candidates)} unique NEW candidate image(s)")
 
     osm_packages: dict = {}
     if args.scan and "osm_package" in sources:
@@ -243,7 +310,13 @@ def run_hunt(args) -> int:
         f.add_signals([(s.category, s.rule) for s in signals])
         f.evidence["manifest_layers"] = len(manifest.manifest.get("layers") or [])
         ok, tier, confirming = confirm(signals)
-        if ok:
+        if ok and _is_known_good_publisher(f):
+            f.status = FindingStatus.SCREENED
+            f.tier = tier
+            f.reasoning += (f" | held for review: known-good publisher, would have "
+                            f"confirmed at Tier-1 ({tier}) -- verify before trusting")
+            screened.append(f)
+        elif ok:
             f.status = FindingStatus.CONFIRMED
             f.tier = tier
             f.confirming = [{"category": s.category, "rule": s.rule, "evidence": s.evidence}
@@ -294,7 +367,12 @@ def run_hunt(args) -> int:
                                "tier2_layers_pulled": t2.layers_pulled,
                                "sbom_hits": sbom_hits})
             ok, tier, confirming = confirm(all_signals, sbom_hits=sbom_hits)
-            if ok:
+            if ok and _is_known_good_publisher(f):
+                f.status = FindingStatus.SCREENED
+                f.tier = tier
+                f.reasoning += (f" | held for review: known-good publisher, would have "
+                                f"confirmed at Tier-2 ({tier}) -- verify before trusting")
+            elif ok:
                 f.status = FindingStatus.CONFIRMED
                 f.tier = tier
                 f.confirming = [{"category": s.category, "rule": s.rule, "evidence": s.evidence}

@@ -6,7 +6,6 @@ import pytest
 
 from knorr.scanning.hosts import has_suspicious_fetch, is_suspicious_host
 
-
 # ---------------------------------------------------------------------------
 # is_suspicious_host
 # ---------------------------------------------------------------------------

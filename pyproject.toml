@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "knorr"
-version = "0.0.1"
+version = "0.1.0"
 description = "Malicious Container Intelligence Engine (static analysis only)"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,11 +29,20 @@ knorr = "knorr.cli:main"
 where = ["src"]
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# The dashboard is a single-file inline HTML/JS/CSS template; wrapping markup
+# to satisfy a Python line-length rule would hurt its own readability more than
+# it helps. Wallet addresses and crypto strings in test fixtures are opaque
+# tokens that should never be wrapped mid-string either.
+"src/knorr/dashboard/app.py" = ["E501"]
+"tests/test_osm_submit.py" = ["E501"]
+"tests/test_iocs.py" = ["E501"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

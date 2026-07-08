@@ -5,4 +5,4 @@ STATICALLY analyzes, and catalogs malicious container images. Static analysis
 only in the MVP -- images are pulled and read, never executed.
 """
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"

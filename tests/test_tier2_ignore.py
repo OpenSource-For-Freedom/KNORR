@@ -6,12 +6,9 @@ and fixed by adding the relevant path to _IGNORE_LAYER_PATH.
 
 from __future__ import annotations
 
-import re
-
 import pytest
 
 from knorr.scanning.tier2 import _IGNORE_LAYER_PATH
-
 
 # ---------------------------------------------------------------------------
 # Paths that MUST be ignored (vendor / SDK / prose / test files)

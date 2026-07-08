@@ -50,6 +50,24 @@ class GitHubClient:
             return []
         return []
 
+    def account_container_packages(self, owner: str) -> list[str]:
+        """List container package names under a GitHub user or org (the GHCR
+        account pivot). Needs ``read:packages`` on the token; returns [] and logs
+        a clear hint if the token lacks that scope (a 403), rather than raising,
+        so a hunt degrades gracefully until the scope is added.
+        """
+        for kind in ("users", "orgs"):
+            url = f"{config.GITHUB_API_URL}/{kind}/{owner}/packages"
+            resp = self.session.get(url, params={"package_type": "container", "per_page": 100},
+                                    timeout=config.HTTP_TIMEOUT)
+            if resp.status_code == 403:
+                log.warning("GHCR package listing for %r needs 'read:packages' scope on "
+                            "the GitHub token (403)", owner)
+                return []
+            if resp.status_code == 200:
+                return [p["name"] for p in resp.json() if p.get("name")]
+        return []
+
     def get_content(self, repo_full: str, path: str, ref: str | None = None) -> str | None:
         """Fetch a file's text via the contents API (base64-decoded). None on error."""
         url = f"{config.GITHUB_API_URL}/repos/{repo_full}/contents/{path}"

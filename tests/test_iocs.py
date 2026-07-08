@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
 from knorr.scanning.iocs import extract_iocs, pool_owned_by_publisher
-
 
 # ---------------------------------------------------------------------------
 # extract_iocs
@@ -42,7 +39,7 @@ def test_extract_raw_ip_c2():
 def test_github_repo_not_in_c2():
     iocs = extract_iocs(["curl https://github.com/user/project/raw/main/install.sh"])
     # github.com should not appear in c2 list
-    assert not any("github.com" == h for h in iocs["c2"])
+    assert not any(h == "github.com" for h in iocs["c2"])
 
 
 def test_extract_miner_binary():

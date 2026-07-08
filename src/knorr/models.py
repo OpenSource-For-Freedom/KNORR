@@ -19,6 +19,7 @@ class DetectionMethod(StrEnum):
     TYPOSQUAT = "typosquat"  # impersonates an Official/Verified image name
     PACKAGE_PIVOT = "package_pivot"  # bakes in a known-malicious package (SBOM)
     LAYER_PIVOT = "layer_pivot"  # shares a confirmed-malicious layer digest
+    DOCKERFILE_SCAN = "dockerfile_scan"  # malicious Dockerfile code found via GitHub search
 
 
 class FindingStatus(StrEnum):

@@ -3,8 +3,11 @@
 .env.*
 !.env.example
 
-# The OSM write/submit path ships out-of-band (detection only in the public repo)
+# The OSM write/submit path ships out-of-band (detection only in the public repo).
+# Its test file travels with it -- a public checkout must never have a tracked
+# test importing a module that isn't there (breaks CI collection on a fresh clone).
 src/knorr/osm_submit.py
+tests/test_osm_submit.py
 
 # Runtime state + evidence artifacts
 data/

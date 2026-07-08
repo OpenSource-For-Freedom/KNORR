@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from knorr.scanning.config_scan import (
     ConfigSignal,
     scan_config,

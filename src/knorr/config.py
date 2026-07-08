@@ -72,7 +72,7 @@ ALERT_WEBHOOK = _first_env("KN_ALERT_WEBHOOK", "GW_DISCORD_WEBHOOK")
 # --- Docker Hub / OCI Distribution endpoints --------------------------------
 # The registry (blob/manifest) host, its token-auth service, and the Hub API
 # (search, stars, pull counts, publisher metadata). Overridable so a later phase
-# can re-point at GHCR / Quay / ECR Public with the same client shape.
+# can re-point at GHCR / ECR Public with the same client shape.
 DOCKERHUB_REGISTRY = os.environ.get("KN_DOCKERHUB_REGISTRY", "registry-1.docker.io")
 DOCKERHUB_AUTH_URL = os.environ.get("KN_DOCKERHUB_AUTH_URL", "https://auth.docker.io/token")
 DOCKERHUB_AUTH_SERVICE = os.environ.get("KN_DOCKERHUB_AUTH_SERVICE", "registry.docker.io")
@@ -81,6 +81,23 @@ DOCKERHUB_API_URL = os.environ.get("KN_DOCKERHUB_API_URL", "https://hub.docker.c
 # Default platform to resolve out of a multi-arch image index.
 DEFAULT_PLATFORM_OS = os.environ.get("KN_PLATFORM_OS", "linux")
 DEFAULT_PLATFORM_ARCH = os.environ.get("KN_PLATFORM_ARCH", "amd64")
+
+# Known-good publishers: legitimate vendors/projects whose own tooling or
+# instrumentation can trip a signature (a security vendor's demo/test fixture,
+# a miner project's own upstream repo, a well-known devops image). Confirmed
+# findings under these publishers are held for manual review instead of
+# auto-confirming, mirroring git_warden's KNOWN_GOOD_OWNERS precision sweep.
+# Born from two live incidents in one night: aquasec (a security vendor's own
+# OpenSSL/AppSec-ruleset fixtures) and xmrig (the upstream miner project itself,
+# a BYO tool, not a cryptojacking distribution). Comma-separated via
+# KN_KNOWN_GOOD_PUBLISHERS to extend without a code change.
+KNOWN_GOOD_PUBLISHERS = frozenset(
+    p.strip().casefold() for p in os.environ.get(
+        "KN_KNOWN_GOOD_PUBLISHERS",
+        "xmrig,aquasec,minervaproject,docker,library,bitnami,linuxserver,"
+        "grafana,prometheus,hashicorp,datadog,newrelic,elastic,sentry",
+    ).split(",") if p.strip()
+)
 
 # --- HTTP politeness ---------------------------------------------------------
 HTTP_TIMEOUT = int(os.environ.get("KN_HTTP_TIMEOUT", "20"))

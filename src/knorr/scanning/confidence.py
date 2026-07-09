@@ -141,3 +141,12 @@ def tier_key(tier: str | None) -> str:
 
 def severity_level(row) -> str:
     return _SEVERITY.get(tier_key(row["tier"]), "high")
+
+
+_SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+
+def severity_rank(row) -> int:
+    """0-4 danger rank from the finding's severity level, worst first. Used to
+    sort a submission batch most-dangerous-first, and by ``--min-severity``."""
+    return _SEVERITY_RANK.get(severity_level(row), 0)

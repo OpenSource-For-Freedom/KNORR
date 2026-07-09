@@ -5,22 +5,31 @@
 | | |
 |---|---|
 | **Document** | Product Requirements Document (PRD) |
-| **Project** | Knörr — Malicious Container & Image Intelligence Engine |
+| **Project** | Knörr: Malicious Container & Image Intelligence Engine |
 | **Repository** | `knorr` (private) |
 | **Owner** | OpenSource-For-Freedom / Tim Gorrie |
-| **Status** | Draft v0.1 |
-| **Visibility** | Private repository — gated feed (later phase) |
+| **Status** | Draft v0.1 (see implementation status below) |
+| **Visibility** | Private repository, gated feed (later phase) |
 | **Date** | July 6, 2026 |
 | **Template** | Built on the [`git_warden`](../../../git_warden) architecture (malicious-repo engine) |
 
-> **The Knörr is the Norse ocean-going cargo ship** — the deep-hulled vessel that
+> **Implementation status (updated):** the name landed on **Knörr** (this PRD's
+> naming discussion below is left as-written, historical). Docker Hub and GHCR
+> hunting, the Dockerfile-in-git scanner, the dashboard, `knorr watch`, and the
+> local OSM submission path are all built and live; Quay.io was evaluated and
+> removed (see the [CHANGELOG](../../CHANGELOG.md)). For the current CLI surface,
+> architecture diagram, and test/CI status, see the [README](../../README.md).
+> This document is retained as the original point-in-time plan, not living
+> documentation.
+
+> **The Knörr is the Norse ocean-going cargo ship**, the deep-hulled vessel that
 > hauled freight across the North Atlantic, the ancestor of every container ship
-> afloat today. Its *vörðr* (Old Norse for "warden" / guardian spirit — the root
+> afloat today. Its *vörðr* (Old Norse for "warden" / guardian spirit, the root
 > of the word *warden* itself) watches the cargo. Knörr never sails an image; it
 > reads what the cargo *is* and senses what it would *do* once unloaded.
 >
 > *Name is provisional and swappable. Norse alternatives on the table:*
-> ***Naglfar*** *(the ship built of the dead — evocative of an image assembled
+> ***Naglfar*** *(the ship built of the dead, evocative of an image assembled
 > from many poisoned layers), or* ***Vörðr*** *(lean fully into the "warden"
 > etymology).*
 

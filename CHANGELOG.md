@@ -7,22 +7,36 @@ discovery pipeline, and a public long-running watch mode.
 
 ### Added
 
+- **OSM submission CLI parity with `git_warden`** (`osm_submit.py`, local-only):
+  `--min-severity`/`--owners` filters applied with severity-first ordering
+  (new `severity_rank`, shared alongside `severity_level` in the public
+  `scanning/confidence.py`); a pre-send **liveness recheck** that re-resolves
+  the image manifest (or re-fetches the raw Dockerfile) right before POSTing,
+  so a payload removed since our scan is never sent to fail OSM review;
+  **corroborated infrastructure IOC reports** for mining-pool/C2 hosts seen
+  across 2+ confirmed images (`report_type: domain`, its own local submit
+  ledger, gated by `--no-domains`/`--min-corroboration`); and three read-only
+  reviewer commands, `--queue` (what is ready to submit), `--reconcile` and
+  `--audit` (what OSM's live state says about our past submissions, with
+  duplicate-canonical-id detection), plus an interactive `--wizard`
+  walkthrough. `OsmClient` (public, `feeds/osm.py`) gained `current_reports()`
+  and `existing_resource()` to back the new reconcile/audit commands.
 - **GitHub Container Registry (GHCR)** as a second hunted registry
   (`--registry ghcr`): daemonless OCI client profile, account-pivot discovery,
   and a GitHub-code-search image-reference discovery source (GHCR has no
   public keyword-search API, so this mines Dockerfiles/compose/k8s manifests
   for `ghcr.io/<owner>/<image>` references naming a malicious term).
-- **`knorr watch`** — a public, first-class long-running hunt loop with
+- **`knorr watch`**: a public, first-class long-running hunt loop with
   Discord/webhook alerts on new confirmed findings. Budget-aware, rotates
   across registries, and is resilient to a single bad round.
-- **Known-good-publisher allowlist** — legitimate vendors (the upstream
+- **Known-good-publisher allowlist**: legitimate vendors (the upstream
   `xmrig` project, `aquasec`, and others) can no longer auto-confirm; a match
   is held for manual review instead.
-- **Shared-wallet auto-promotion** — a review/BYO-bucketed image whose payout
+- **Shared-wallet auto-promotion**: a review/BYO-bucketed image whose payout
   wallet matches an already-confirmed image is promoted to high-confidence
   regardless of its own command shape (proven on the `isukim`/`donafro`
   cryptojacking fleets).
-- **OSM submission ledger** (`osm_submit.py --ledger`) — a methodology +
+- **OSM submission ledger** (`osm_submit.py --ledger`): a methodology and
   precision-stats Markdown report for review/audit.
 - Retry/backoff for transient registry errors (5xx, network), so a single
   flaky response no longer drops an image from a long-running hunt.

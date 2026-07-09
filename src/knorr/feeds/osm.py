@@ -127,6 +127,44 @@ class OsmClient:
         data = self._search({"q": resource_identifier})
         return bool(data.get("total", 0))
 
+    def current_reports(self, ecosystem: str = CONTAINER_ECOSYSTEM) -> dict[str, dict]:
+        """CHECK OSM FIRST: what OSM currently reports for ``ecosystem``, from the
+        recent-window ``query-latest`` feed, as ``{resource_key: {id, status,
+        resource}}``.
+
+        A hit here is authoritative "already reported". A miss only means "not in
+        the recent window" -- it does NOT prove novelty (see :meth:`container_catalog`
+        / :meth:`existing_resource` for the full-history check). Backs
+        ``osm_submit.py``'s ``--reconcile``/``--audit``, which need each
+        submission's live status, not just a novelty bool.
+        """
+        out: dict[str, dict] = {}
+        for t in self._get(ecosystem):
+            rid = (t.get("resource_identifier") or t.get("package_name") or "").strip()
+            if not rid:
+                continue
+            out[rid.casefold()] = {
+                "id": t.get("id"), "status": t.get("status"),
+                "verified_by": t.get("verified_by"), "resource": rid,
+            }
+        return out
+
+    def existing_resource(self, term: str) -> dict | None:
+        """Full-history exact lookup for one resource (any report_type): the
+        pre-existing OSM record for ``term``, or ``None`` if truly novel.
+
+        Unlike :meth:`already_reported` (a bare bool), this returns the actual
+        record (id, status) so a caller can tell verified from pending from a
+        different researcher's duplicate. Backs ``--audit``/``--reconcile``.
+        """
+        data = self._search({"q": term})
+        want = term.strip().casefold()
+        for row in data.get("data") or []:
+            rid = str(row.get("resource_identifier") or row.get("package_name") or "")
+            if rid.strip().casefold() == want:
+                return row
+        return None
+
     def malicious_packages(self, ecosystems: tuple[str, ...] = PACKAGE_ECOSYSTEMS) -> dict:
         """Known-malicious packages for the SBOM match.
 

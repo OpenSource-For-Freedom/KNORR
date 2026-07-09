@@ -72,11 +72,139 @@ When one vessel in an account is confirmed poison, the whole harbor is suspect. 
 ```
 knorr probe <image>     # Tier-1 read of one image: manifest, config, signal score
 knorr hunt              # Full sail: discover -> screen -> confirm -> registry
+knorr dockerfiles        # Hunt malicious Dockerfile CODE on GitHub (pre-publish)
+knorr serve              # Read-only threat-telemetry dashboard (default :8789)
+knorr watch              # Long-running hunt loop with Discord alerts
 ```
+
+| Command | What it does |
+|---|---|
+| `knorr probe --image <ref>` | Tier-1 read of one image (manifest + config, no layer pull); prints the signal score. The cheap sanity check before trusting the pipeline. |
+| `knorr hunt --registry {docker,ghcr}` | Full pipeline: discover → Tier-1 screen → Tier-2 confirm → registry. `--scan` runs Tier-2; `--sources` picks discovery methods; `--limit`/`--tier1-limit` bound the pull budget. |
+| `knorr dockerfiles` | Mines GitHub code search for malicious Dockerfile CODE (reverse shells, C2, droppers) *before* an image is ever published. Persists hits into the same registry the dashboard reads. |
+| `knorr serve --port 8789` | Serves the live dashboard: confirmed detections, threat-facet breakdown, registry/source split, novelty vs. OSM. Read-only over the SQLite store. |
+| `knorr watch --duration <s> --registries docker,ghcr` | Runs repeated hunts for a set duration, posting a Discord alert for every new **HIGH-confidence** finding only, the identical bar OSM submission uses (see below). |
+| `python -m knorr.osm_submit` | **Local-only, gitignored.** The write path to OpenSourceMalware: dry-run by default, `--confirm` to POST. Not shipped in the public repo, see [OSM submission](#reporting-to-osm). |
 
 The hold is light by design. The runtime needs only `requests`. Trivy is shelled out, never reimplemented. No pydantic. Runs clean on Python 3.14.
 
-What comes out of the hold: **findings CSV**, **summary**, **SQLite ledger**. The captain records everything. Nothing goes to OSM without a human hand on the wheel.
+What comes out of the hold: **findings CSV**, **summary**, **SQLite ledger**, a **live dashboard**. The captain records everything. Nothing goes to OSM without a human hand on the wheel.
+
+---
+
+## How the Ship Is Built
+
+Discovery feeds two registries (Docker Hub, GHCR) and one pre-publish source (GitHub
+Dockerfiles) into the same Tier-1 → Tier-2 → confirmation-gate pipeline, all landing in
+one SQLite registry. Everything downstream, the dashboard, the long-running watch
+loop's Discord alerts, and OSM submission, reads from that one store and is gated by
+the *same* confidence tiering, so what gets alerted and what gets submitted can never
+quietly drift apart.
+
+```mermaid
+flowchart TD
+    classDef store fill:#1c548f,color:#fff,stroke:#0d2c4a
+    classDef gate fill:#b5731a,color:#fff,stroke:#7a4d10
+    classDef drop fill:#5a6472,color:#fff,stroke:#333a42
+    classDef live fill:#22aa66,color:#fff,stroke:#0f5c34
+
+    A1["Docker Hub: search / publisher pivot / typosquat"]
+    A2["GHCR: account pivot"]
+    A3["GitHub code search: ghcr.io/&lt;owner&gt;/&lt;image&gt; refs"]
+    A4["GitHub code search: malicious Dockerfile code"]
+    A5["OSM container feed: seed targets + novelty check"]
+
+    A1 --> B
+    A2 --> B
+    A3 --> B
+    A5 --> B
+
+    subgraph B["Tier-1 screen (no layer pull)"]
+        direction TB
+        B1["Manifest + config only"]
+        B2["Score signals: pool/wallet strings, ENV vars, entrypoint shape"]
+    end
+
+    B -- "score clears threshold" --> C
+    B -. "clean" .-> X1["discarded"]:::drop
+
+    subgraph C["Tier-2 confirm (bounded layer pull)"]
+        direction TB
+        C1["Extract + unpack layers"]
+        C2["Trivy SBOM match + content scan"]
+    end
+
+    A4 --> D
+
+    subgraph D["Precision-first confirmation gate"]
+        direction TB
+        D1["Tier-A signature confirms alone / Tier-B needs corroboration"]
+        D2["Known-good-publisher allowlist -&gt; held for review, never auto-confirmed"]
+        D3["Shared-wallet auto-promotion across a proven-bad publisher's fleet"]
+    end
+
+    C --> D
+
+    D -- confirmed --> E[("SQLite registry<br/>image_findings + runs")]:::store
+    D -- "screened / rejected" --> E
+
+    E --> F1["knorr serve<br/>read-only dashboard"]
+    E --> F2["knorr watch<br/>long-running hunt loop"]
+    E --> F3["osm_submit.py<br/>local-only, gitignored"]
+
+    F2 --> G{{"scanning/confidence.py<br/>shared confidence tiering"}}:::gate
+    F3 --> G
+
+    G -- high --> H1["Discord alert"]:::live
+    G -- high --> H2["Liveness recheck:<br/>image / Dockerfile still live?"]
+    G -- "review / byo" --> H3["held for manual review, never alerted or submitted"]
+
+    H2 -- live --> H4["POST submit-threat-report"]:::live
+    H2 -. gone .-> H5["skipped, never sent"]:::drop
+```
+
+**The precision-first philosophy**, inherited from `git_warden`: a Tier-A signature
+(a reverse shell, a hardcoded miner wallet) confirms an image on its own; a Tier-B
+signal needs a second, independent corroborating signal; an OSM label or a name match
+alone never confirms anything. The confidence gate then splits confirmed findings into
+`high` (submission-eligible), `review` (an ENV-default wallet, a very high pull count:
+gray area, held for a human), and `byo` (a parameterized tool, someone's own miner
+config: never submitted). That same three-way split governs Discord alerts, the
+dashboard, and OSM submission identically.
+
+### Reporting to OSM
+
+The write path (`osm_submit.py`) is **local-only and gitignored**, the public repo
+ships detection, not the submission credentials or logic. It checks OSM's full
+history before ever sending anything, re-verifies each payload is still live right
+before POSTing, and never auto-submits anything below the `high` confidence tier.
+It also mirrors `git_warden`'s reviewer tooling: `--queue` (what's ready, read-only),
+`--reconcile`/`--audit` (what OSM currently says about our submissions), and
+`--wizard` (an interactive walkthrough for a non-technical operator).
+
+---
+
+## Project Layout
+
+```
+src/knorr/
+  cli.py                CLI entry point (probe / hunt / dockerfiles / serve / watch)
+  hunt.py                Discovery -> Tier-1 -> Tier-2 -> registry orchestration
+  db.py                  SQLite registry (image_findings, runs)
+  watch.py               Long-running hunt loop + Discord alerting
+  config.py              Env/credential loading, known-good-publisher allowlist
+  registry/              Daemonless OCI clients (Docker Hub + GHCR, shared code)
+  scanning/               Signature library, Tier-1/Tier-2 scanners, confidence.py
+                         (the shared confirm/alert/submit gate), the Dockerfile scanner
+  feeds/                 GitHub + OSM API clients
+  dashboard/              Self-contained read-only web dashboard (stdlib http.server)
+tests/                   pytest suite (346 tests; osm_submit.py's own tests travel
+                         with it, out-of-band, since the module itself is gitignored)
+docs/plans/01 PRD.md     The original product requirements document
+```
+
+Testing: [![CI](https://github.com/OpenSource-For-Freedom/KNORR/actions/workflows/ci.yml/badge.svg)](https://github.com/OpenSource-For-Freedom/KNORR/actions/workflows/ci.yml)
+`ruff check` + `pytest` on every push/PR to `main`, Python 3.12 and 3.13.
 
 ---
 

@@ -1,0 +1,14 @@
+# gitleaks config for KNÖRR — extends the built-in ruleset with an allowlist
+# scoped to files that are supposed to contain placeholder/opaque strings.
+# A real credential outside these paths is what should turn the scan red.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Templates and test fixtures carry fake/opaque tokens by design"
+paths = [
+  '''\.env\.example$''',
+  '''^tests/''',
+  '''(^|/)docs/''',
+]

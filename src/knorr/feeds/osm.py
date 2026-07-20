@@ -137,7 +137,13 @@ class OsmClient:
         / :meth:`existing_resource` for the full-history check). Backs
         ``osm_submit.py``'s ``--reconcile``/``--audit``, which need each
         submission's live status, not just a novelty bool.
+
+        With no token configured there is nothing to reconcile against, so this
+        degrades to an empty map without issuing a request (unlike the hunt-path
+        ``_get`` helpers, which fail loud on a missing token).
         """
+        if not self.token:
+            return {}
         out: dict[str, dict] = {}
         for t in self._get(ecosystem):
             rid = (t.get("resource_identifier") or t.get("package_name") or "").strip()

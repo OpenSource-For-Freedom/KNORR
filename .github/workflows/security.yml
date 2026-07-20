@@ -1,0 +1,76 @@
+name: Security
+
+# DevSecOps gate for a tool that handles registry/OSM tokens and shells out to
+# Trivy. Runs on every push (any branch) and PR, plus a weekly sweep so a newly
+# disclosed CVE in a dependency is caught even without a push.
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['**']
+  pull_request:
+  schedule:
+    - cron: '27 6 * * 1'   # Mondays 06:27 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Known-vulnerable dependency check. The runtime footprint is tiny (requests),
+  # so this stays fast and should be clean; it earns its keep on the weekly sweep.
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e .
+      - name: Freeze the runtime dependency closure
+        # Freeze BEFORE installing pip-audit so the audited set is exactly the
+        # project's runtime deps. pip freeze omits pip/setuptools/wheel, so the
+        # ambient build tooling never reds this gate — only a CVE in a real
+        # dependency (requests + its transitives) does.
+        run: python -m pip freeze --exclude-editable > audit-requirements.txt
+      - name: Install pip-audit
+        run: python -m pip install pip-audit
+      - name: Audit runtime dependency closure
+        run: pip-audit --strict --progress-spinner off -r audit-requirements.txt
+
+  # Static application security testing. -ll -ii keeps it to medium+ severity and
+  # medium+ confidence: the sole subprocess call is list-form (no shell=True) and
+  # every requests call carries a timeout, so this reports real issues, not noise.
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install bandit
+        run: python -m pip install "bandit[toml]"
+      - name: Run bandit
+        run: bandit -r src -ll -ii
+
+  # Secret scan of the pushed tree. Config allowlists the .env template and the
+  # test fixtures (opaque wallet/token strings), so a real leaked credential is
+  # what turns this red.
+  secret-scan:
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: "8.18.4"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install gitleaks
+        run: |
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Scan working tree for secrets
+        run: gitleaks detect --no-git --source . --config .gitleaks.toml --redact --verbose

@@ -7,6 +7,16 @@ discovery pipeline, and a public long-running watch mode.
 
 ### Added
 
+- **OSM cross-check in the confirm path** (`hunt.py`'s `_osm_cross_check`, both
+  Tier-1 and Tier-2 confirm sites): every freshly-confirmed finding now gets a
+  live lookup against OSM's own database. A VERIFIED report for the exact same
+  image from another researcher is recorded as corroboration; a FALSE_POSITIVE
+  verdict auto-downgrades the finding to held-for-review instead of silently
+  staying confirmed. Fails open on any network/API error. Closes the gap that
+  let `d0whc3r/kali-ssh` (see Fixed, below) reach OSM submission unchecked.
+- GHCR discovery vocabulary widened from 9 to 26 terms (parity with Docker
+  Hub's search list), and the GHCR round's Tier-1/Tier-2 budget in `knorr
+  watch` raised to actually work through the larger candidate pool.
 - **OSM submission CLI parity with `git_warden`** (`osm_submit.py`, local-only):
   `--min-severity`/`--owners` filters applied with severity-first ordering
   (new `severity_rank`, shared alongside `severity_level` in the public
@@ -80,16 +90,35 @@ discovery pipeline, and a public long-running watch mode.
   only fire on the same `high`-confidence bar OSM submission uses, and show
   the actual severity, confidence tier, and confirming proof line instead of a
   fixed crypto-shaped template.
-
-### Known issues
-
-- The `mirai-gafgyt` malware-family signature (and, in one case,
-  `linux-cryptobot`/`c2-framework`/`preload-rootkit` alongside it) has matched
-  generic FSF/GNU copyright boilerplate and bundled open-source JS libraries
-  (MathJax, zxcvbn, GNU autotools' `config.guess`/`config.sub`) rather than
-  actual malware code on at least three images. Those specific findings were
-  caught and rejected before submission; the underlying rule still needs
-  tightening so it stops confirming on generic license/copyright text.
+- **Generic-boilerplate false positives, resolved at the root** (previously
+  tracked as a known issue): `mirai-gafgyt`/`linux-cryptobot`/`c2-framework`/
+  `preload-rootkit` were matching GNU/FSF copyright boilerplate (`config.sub`,
+  `config.guess`), CMake's own build bookkeeping, README/INSTALL prose,
+  protobuf-generated `_pb2.py` files, stock Debian/OS files (`ssh_config`,
+  `/etc/protocols`, glibc's `catchsegv`/`fakeroot`), and vendored third-party
+  code (a `thirdparty/` directory) rather than actual malware. Tier-2's
+  ignore-path list (`scanning/tier2.py`) now excludes all of these.
+  Additionally: `linux-cryptobot`'s bare `dero` term collided with the real
+  Dero cryptocurrency that miners like xmrig legitimately support (tightened
+  to require `deromoner`), and xmrig's own shipped example/template scripts
+  (angle-bracket `<wallet address>` placeholder syntax) and donation-mechanism
+  source (`donate.h`) were misread as a hardcoded attacker payout. Re-auditing
+  the 21 confirmed images this affected: 14 kept confirmed with corrected
+  (lower) scores, 7 were false positives with no confirming evidence left.
+- **Metasploit/msfvenom no longer confirm alone.** `c2-framework` bundled them
+  with genuinely near-exclusively-malicious frameworks (Cobalt Strike, Sliver,
+  Havoc), but Metasploit is mainstream, legal, and ships by default in Kali
+  Linux; a bare "apt-get install metasploit-framework" reads as a security
+  researcher's own toolbox as much as malice. They now live in a separate
+  dual-use `pentest-toolkit` signal that is scored but never confirms alone.
+  Caught because `d0whc3r/kali-ssh` had already been submitted to OSM on this
+  exact false signal (its "C2 host" evidence was gitlab.com/www.kali.org);
+  that submission is rejected locally and needs manual follow-up on OSM, since
+  its API has no retraction/update endpoint.
+- **sqlmap's own bundled assets** (a wordlist, its default config template,
+  and vendored third-party libraries under `thirdparty/`) were misread as
+  malware-family/rootkit/C2/obfuscation signals on `marcomsousa/sqlmap`, a
+  mainstream, legal SQL-injection testing tool.
 
 ## 0.0.1
 

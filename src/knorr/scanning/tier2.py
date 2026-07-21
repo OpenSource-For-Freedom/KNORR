@@ -56,6 +56,7 @@ _IGNORE_LAYER_PATH = re.compile(
     r"lib|lib64|var/lib/dpkg|site-packages|dist-packages|node_modules/[^/]+/(docs?|test)|"
     r"perl\d?|perl-base|unicore|man\d?)(/|$)"
     r"|/doc/|copyright$|changelog(\.\w+)?$|(^|/)LICENSE|\.pod$|\.1$|\.3$|\.md$"
+    r"|(^|/)(README|INSTALL|NEWS|AUTHORS)(\.\w+)?$"
     r"|_test\.go$"
     # Security/APM vendor instrumentation configs legitimately NAME the malware
     # families and attack patterns they detect (a WAF ruleset listing "mirai",
@@ -64,7 +65,44 @@ _IGNORE_LAYER_PATH = re.compile(
     # to a security tool's own detection-rule data). Observed on dd-trace's
     # appsec/recommended.json inside aquasec/codesec-remediation.
     r"|node_modules/(?:@datadog/|dd-trace/|@sentry/|newrelic/|elastic-apm-node/)"
-    r"|appsec/recommended\.json$",
+    r"|appsec/recommended\.json$"
+    # GNU autotools' generated boilerplate (config.sub/config.guess carry the
+    # exact same FSF copyright/portability-triplet text across every autotools
+    # project regardless of what it builds) and CMake's own auto-generated
+    # build bookkeeping -- both proven to false-positive on c2-framework and
+    # malware_family rules for images that build a real open-source miner
+    # (ccminer, xmrig) from source (the cryptoandcoffee/pmietlicki cluster).
+    r"|(^|/)config\.(?:sub|guess)$|CMakeFiles/|(^|/)CMakeCache\.txt$"
+    # Stock package/OS files whose CANONICAL default content coincidentally
+    # matches a signature (an example ~/.ssh/id_rsa path in ssh_config's own
+    # comments, glibc/fakeroot's own wrapper scripts, the static IANA
+    # protocol-number table) -- present verbatim in nearly every Debian-based
+    # image regardless of what the image actually does.
+    r"|(^|/)etc/ssh/sshd?_config$|(^|/)etc/(?:protocols|services)$"
+    r"|(^|/)usr/bin/(?:catchsegv|fakeroot(?:-sysv|-tcp)?)$"
+    # Compiler/codegen output: a protobuf-generated _pb2.py (or its grpc
+    # sibling) is a mechanical data/enum dump, never hand-written payload
+    # (the bowwow/poke-man false positive: a Pokemon-species enum file).
+    r"|_pb2(?:_grpc)?\.py$"
+    # XMRig's own shipped "*_example.*" template scripts use angle-bracket
+    # PLACEHOLDER syntax (-u <wallet address>, -o <pool address>), never a
+    # real value, and its donate.h/.cpp is the project's own well-documented
+    # opt-in donation wallet, not a targeted attacker's payout -- both proven
+    # to false-confirm cryptojacking on the cryptoandcoffee ccminer cluster
+    # (the images had NO actual hardcoded wallet anywhere else in the layer).
+    r"|_example\.\w+$|(^|/)donate\.(?:h|cpp)$"
+    # Vendored third-party code: a "thirdparty/" (or "3rdparty/") directory is
+    # explicitly not-this-project's-own code by the project's own naming
+    # convention, the same "vendor code" principle as node_modules/usr-lib
+    # above. sqlmap's own bundled Mozilla chardet library and a ported Unix
+    # crypt(3) implementation both false-confirmed malware_family/obfuscation
+    # rules this way (the marcomsousa/sqlmap false positive).
+    r"|(^|/)(?:3rd|third)party/"
+    # sqlmap's own shipped wordlist (a huge dictionary of arbitrary short
+    # strings is all but guaranteed to coincidentally contain a malware-family
+    # substring) and its default config TEMPLATE (documentation/example
+    # values, not this image's own operational configuration).
+    r"|(^|/)sqlmap/data/txt/|(^|/)sqlmap\.conf$",
     re.I,
 )
 # Trivy pkg Type -> OSM ecosystem, for the SBOM match.

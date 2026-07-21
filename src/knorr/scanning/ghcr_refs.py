@@ -29,14 +29,25 @@ _GHCR_REF = re.compile(r"ghcr\.io/([\w.\-]+/[\w.\-]+?)(?::[\w.\-]+)?(?=[\"'\s]|$
 # require IN the extracted reference itself for precision (mirrors hub_search:
 # a candidate surfaces because the term appears in its own name, not because it
 # appears anywhere in an unrelated file that happens to also mention ghcr.io).
+# Kept in rough parity with discovery.py's DEFAULT_SEARCH_TERMS (Docker Hub),
+# minus multi-word phrases: those can never appear inside an image name slug,
+# so they would be pure wasted query budget against GitHub's tight code-search
+# rate limit.
 DEFAULT_GHCR_TERMS = (
-    "xmrig", "cpuminer", "ccminer", "monero", "cryptominer", "kinsing",
-    "xmr-stak", "nbminer", "miner",
+    # miner families (image-name-shaped: no spaces)
+    "xmrig", "cpuminer", "ccminer", "nbminer", "lolminer", "phoenixminer",
+    "ethminer", "nanominer", "teamredminer", "srbminer", "xmr-stak",
+    "ariominer", "cryptominer", "coinminer", "miner",
+    # coin-specific miner name patterns actually seen in the wild this project
+    "monero-miner", "dero-miner", "ravencoin-miner", "cryptonight",
+    "supportxmr", "randomx", "monero",
+    # known campaigns / droppers
+    "kinsing", "kdevtmpfsi", "teamtnt", "watchdog",
 )
 
 
 def search_ghcr_image_refs(
-    client, terms=DEFAULT_GHCR_TERMS, *, per_query: int = 15, pace: float = 7.0,
+    client, terms=DEFAULT_GHCR_TERMS, *, per_query: int = 25, pace: float = 7.0,
     known: set[str] | None = None, progress=None,
 ) -> list[dict]:
     """Search GitHub code for ``ghcr.io/<owner>/<image>`` references naming a

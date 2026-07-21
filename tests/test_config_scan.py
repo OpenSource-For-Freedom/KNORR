@@ -103,6 +103,56 @@ def test_c2_framework_cobalt_strike():
     assert any(s.rule == "c2-framework" for s in sigs)
 
 
+def test_c2_framework_meterpreter_still_confirms():
+    sigs = scan_config(_cfg(entrypoint=["meterpreter"]))
+    assert any(s.rule == "c2-framework" for s in sigs)
+
+
+def test_metasploit_install_is_dual_use_not_c2_framework():
+    """A bare "apt-get install metasploit-framework" build line must NOT be
+    c2-framework: Metasploit is the world's most mainstream, legal pentesting
+    framework, ships by default in Kali Linux, and is exactly as consistent
+    with a security researcher's own toolbox image as with malice (the
+    d0whc3r/kali-ssh false positive, submitted to OSM before this was caught:
+    its "C2 host" evidence was gitlab.com/www.kali.org)."""
+    sigs = scan_config(_cfg(history=[
+        "RUN /bin/sh -c apt-get install -yq metasploit-framework sqlmap",
+    ]))
+    assert not any(s.rule == "c2-framework" for s in sigs)
+    assert any(s.rule == "pentest-toolkit" for s in sigs)
+
+
+def test_msfvenom_is_pentest_toolkit_not_c2_framework():
+    sigs = scan_config(_cfg(cmd=["msfvenom", "-p", "linux/x64/shell_reverse_tcp"]))
+    assert any(s.rule == "pentest-toolkit" for s in sigs)
+    assert not any(s.rule == "c2-framework" for s in sigs)
+
+
+# ---------------------------------------------------------------------------
+# Malware / botnet families
+# ---------------------------------------------------------------------------
+
+def test_linux_cryptobot_known_family():
+    sigs = scan_config(_cfg(entrypoint=["kinsing"]))
+    assert any(s.rule == "linux-cryptobot" for s in sigs)
+
+
+def test_linux_cryptobot_deromoner_family_matches():
+    sigs = scan_config(_cfg(entrypoint=["/bin/deromoner", "--start"]))
+    assert any(s.rule == "linux-cryptobot" for s in sigs)
+
+
+def test_linux_cryptobot_bare_dero_does_not_match():
+    """Dero is a real, popular privacy coin that legitimate miners (xmrig,
+    etc.) genuinely support and reference in their own source; a bare "dero"
+    must not confirm linux-cryptobot (the pmietlicki/xmrig-nvidia false
+    positive, matching xmrig's own AstroBWT/Dero mining-algorithm code)."""
+    sigs = scan_config(_cfg(history=[
+        "COPY src/AstroBWT/dero/xmrig-cu_generated_AstroBWT.cu.o /build/",
+    ]))
+    assert not any(s.rule == "linux-cryptobot" for s in sigs)
+
+
 # ---------------------------------------------------------------------------
 # Exfiltration
 # ---------------------------------------------------------------------------

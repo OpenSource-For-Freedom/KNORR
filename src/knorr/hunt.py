@@ -100,6 +100,40 @@ def _is_known_good_publisher(f: ImageFinding) -> bool:
     return bool(candidates & config.KNOWN_GOOD_PUBLISHERS)
 
 
+def _osm_cross_check(f: ImageFinding, osm: OsmClient) -> None:
+    """Cross-check a freshly-confirmed finding against OSM's OWN database.
+
+    Independent corroboration: OSM already carries a VERIFIED report for this
+    exact image, from another researcher entirely, is a strong signal our
+    confirmation is right (recorded, not gating). A FALSE_POSITIVE verdict is
+    the opposite: another set of reviewers already looked at this exact image
+    and rejected it, so we should not trust our own Tier-1/Tier-2 confirm
+    alone either -- downgrade to SCREENED (held for review), not silently
+    stay CONFIRMED. Born from the d0whc3r/kali-ssh incident: a metasploit-
+    framework install line confirmed it locally and it was submitted to OSM
+    before anyone checked whether OSM (or its own reviewers) had an opinion.
+    Fails open (network/API error never blocks a confirm) since this is a
+    corroboration signal, not a required gate.
+    """
+    try:
+        hit = osm.existing_resource(f.image)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("OSM cross-check failed for %s: %s", f.image, exc)
+        return
+    if not hit:
+        return
+    status = str(hit.get("status") or "").lower()
+    if status == "false_positive":
+        f.status = FindingStatus.SCREENED
+        f.reasoning += (f" | OSM cross-check: another researcher's report for this exact "
+                        f"image was marked FALSE_POSITIVE by OSM (id "
+                        f"{str(hit.get('id'))[:8]}) -- held for review, not auto-confirmed")
+    elif status == "verified":
+        f.evidence["osm_corroboration"] = {"id": hit.get("id"), "status": "verified"}
+        f.reasoning += (f" | corroborated: OSM already has this image VERIFIED "
+                        f"(id {str(hit.get('id'))[:8]}) by another researcher")
+
+
 def _attribution(tags: list[str]) -> str | None:
     lower = [t.casefold() for t in tags]
     for camp in _CAMPAIGN_TAGS:
@@ -323,8 +357,13 @@ def run_hunt(args) -> int:
                             for s in confirming]
             _capture_iocs(f, strings_from_config(cfg))
             f.reasoning += f" | CONFIRMED at Tier-1 ({tier})"
-            confirmed_t1 += 1
-            _mon(f"  [{i}/{len(items)}] CONFIRM {f.image}  ({tier}, score {f.score})")
+            _osm_cross_check(f, osm)
+            if f.status == FindingStatus.CONFIRMED:
+                confirmed_t1 += 1
+                _mon(f"  [{i}/{len(items)}] CONFIRM {f.image}  ({tier}, score {f.score})")
+            else:
+                screened.append(f)
+                _mon(f"  [{i}/{len(items)}] held (OSM FALSE_POSITIVE) {f.image}  ({tier})")
         elif f.score >= 4 or f.detection_method == DetectionMethod.OSM_CONTAINER:
             f.status = FindingStatus.SCREENED
             screened.append(f)
@@ -379,8 +418,12 @@ def run_hunt(args) -> int:
                                 for s in confirming] or [{"sbom": h} for h in sbom_hits]
                 _capture_iocs(f)
                 f.reasoning += f" | CONFIRMED at Tier-2 ({tier})"
-                confirmed_t2 += 1
-                _mon(f"      CONFIRM {f.image}  ({tier})")
+                _osm_cross_check(f, osm)
+                if f.status == FindingStatus.CONFIRMED:
+                    confirmed_t2 += 1
+                    _mon(f"      CONFIRM {f.image}  ({tier})")
+                else:
+                    _mon(f"      held (OSM FALSE_POSITIVE) {f.image}  ({tier})")
             else:
                 f.reasoning += " | Tier-2 found no confirming evidence"
             db.upsert_finding(f, run_id)

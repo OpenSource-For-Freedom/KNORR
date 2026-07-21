@@ -44,6 +44,42 @@ from knorr.scanning.tier2 import _IGNORE_LAYER_PATH
     # Copyright / changelog / license
     "usr/share/doc/openssl/copyright",
     "usr/share/doc/curl/changelog.Debian.gz",
+    # Project's own README/INSTALL/NEWS/AUTHORS (prose, not payload)
+    "src/README.txt",
+    "home/miner/xmrig/README.md",
+    "src/INSTALL",
+    "project/NEWS",
+    "project/AUTHORS",
+    # GNU autotools generated boilerplate
+    "src/config.sub",
+    "src/config.guess",
+    # CMake's own build-system bookkeeping
+    "home/miner/xmrig/build/xmrig-cuda/build/CMakeCache.txt",
+    "home/miner/xmrig/build/xmrig-cuda/build/CMakeFiles/xmrig-cu.dir/link.txt",
+    # Stock package/OS files whose default content coincidentally matches
+    "etc/ssh/ssh_config",
+    "etc/ssh/sshd_config",
+    "etc/protocols",
+    "etc/services",
+    "usr/bin/catchsegv",
+    "usr/bin/fakeroot-sysv",
+    "usr/bin/fakeroot-tcp",
+    # Protobuf-compiler-generated code (mechanical enum/data dumps)
+    "usr/local/app/pogo/POGOProtos/Enums/PokemonClass_pb2.py",
+    "src/api_pb2_grpc.py",
+    # XMRig's own shipped example/template scripts (placeholder syntax) and
+    # its own donation-mechanism source
+    "home/miner/xmrig/scripts/pool_mine_example.cmd",
+    "home/miner/xmrig/scripts/solo_mine_example.cmd",
+    "home/miner/xmrig/src/donate.h",
+    "home/miner/xmrig/src/donate.cpp",
+    # Vendored third-party code directories
+    "sqlmap/thirdparty/chardet/big5freq.py",
+    "sqlmap/thirdparty/fcrypt/fcrypt.py",
+    "app/3rdparty/lib.js",
+    # sqlmap's own wordlist and default config template
+    "sqlmap/data/txt/smalldict.txt",
+    "sqlmap/sqlmap.conf",
 ])
 def test_ignored_vendor_paths(path):
     assert _IGNORE_LAYER_PATH.search(path) is not None, (
@@ -75,6 +111,26 @@ def test_ignored_vendor_paths(path):
     # Docker entrypoint wrapper
     "docker-entrypoint.sh",
     "entrypoint.sh",
+    # A real payload config, not GNU config.sub/guess or CMake bookkeeping
+    "opt/miner/config.json",
+    "home/user/config.sh",
+    # An actual SSH private key / non-stock sshd path, not the stock templates
+    "root/.ssh/id_rsa",
+    "home/user/.ssh/authorized_keys",
+    "opt/app/sshd_config",  # not under etc/ssh/
+    # A dropped script that merely borrows a stock-sounding name/dir, not the
+    # exact stock binary path
+    "usr/bin/fakeroot-evil.sh",
+    "usr/local/bin/catchsegv",
+    # A filename that merely contains "example"/"donate" as a substring, not
+    # the exact stock XMRig template/donation-source pattern
+    "opt/miner/example_config.json",
+    "opt/miner/donate.sh",
+    # A filename that merely contains "thirdparty" as a substring, not an
+    # actual thirdparty/ directory component
+    "opt/miner/thirdparty_backdoor.sh",
+    # A data/txt/ path NOT under sqlmap's own tree
+    "opt/data/txt/malicious.txt",
 ])
 def test_payload_paths_not_ignored(path):
     assert _IGNORE_LAYER_PATH.search(path) is None, (

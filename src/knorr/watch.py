@@ -223,7 +223,12 @@ def watch(
             else:
                 log.info("docker pull budget low (~%d); skipping this round", budget)
         else:
-            _run_one_hunt(registry, db_path, 40, 2, 0.2)
+            # GHCR has no daemon-side pull budget to protect (unlike Docker
+            # Hub), so its round is sized by the widened DEFAULT_GHCR_TERMS
+            # search instead: more Tier-1 screening headroom and a bigger
+            # Tier-2 confirm slice to actually work through the larger
+            # candidate pool it now surfaces.
+            _run_one_hunt(registry, db_path, 80, 5, 0.2)
 
         db = Database.open(db_path)
         wallet_map = wallet_to_images(db)

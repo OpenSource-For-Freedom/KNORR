@@ -87,10 +87,25 @@ _RULES: tuple[tuple[str, str, int, re.Pattern[str]], ...] = (
     ("reverse_shell", "powershell-revshell", 5, _r(
         r"New-Object\s+System\.Net\.Sockets\.TCPClient|IEX\s*\(\s*New-Object")),
     ("reverse_shell", "socat-shell", 5, _r(r"socat\b[^\n]*(?:EXEC:|exec:)[^\n]*(?:sh|bash|pty)")),
+    # Near-exclusively-malicious red-team C2 frameworks (negligible legitimate
+    # base rate as a bare string match) confirm alone. "metasploit"/"msfvenom"
+    # are deliberately NOT here: Metasploit is the world's most mainstream,
+    # legal pentesting framework, ships by default in Kali Linux, and a bare
+    # "apt-get install metasploit-framework" build line is exactly as
+    # consistent with a security researcher's own toolbox image as with
+    # malice (the d0whc3r/kali-ssh false positive, already submitted to OSM
+    # before this was caught: a "C2 host" of gitlab.com/www.kali.org was the
+    # tell). See "pentest-toolkit" below for the dual-use, scored-not-confirmed
+    # treatment "meterpreter" was kept here: unlike a package name, actually
+    # finding the literal payload name in content is a stronger signal of use.
     ("c2", "c2-framework", 5, _r(
-        r"\b(meterpreter|metasploit|msfvenom|cobalt\s?strike|cobaltstrike|beacon\.(?:dll|bin)|"
+        r"\b(meterpreter|cobalt\s?strike|cobaltstrike|beacon\.(?:dll|bin)|"
         r"sliver|havoc|mythic|powershell[-_]?empire|covenant|merlin|brute\s?ratel|bruteratel|"
         r"posh[-_]c2|sillenttrinity|silenttrinity)\b")),
+    # Dual-use pentesting tools: legitimate on a security researcher's own
+    # image, so scored for ranking (like nmap/--privileged) but never confirms
+    # alone (see gate.py's _CONFIRM_ALONE, which deliberately omits this rule).
+    ("c2", "pentest-toolkit", 2, _r(r"\b(metasploit(?:-framework)?|msfvenom|msfconsole)\b")),
     ("c2", "dyndns-c2", 3, _r(
         r"\b[\w.\-]+\.(?:duckdns\.org|ngrok\.io|serveo\.net|hopto\.org|no-ip\.\w+|"
         r"myftp\.\w+|dynu\.\w+|zapto\.org|portmap\.io)\b")),
@@ -193,7 +208,13 @@ _RULES: tuple[tuple[str, str, int, re.Pattern[str]], ...] = (
         r"\b(mirai|gafgyt|bashlite|tsunami|kaiten|qbot|mozi|hajime|dark[-_]?nexus)\b|"
         r"/bin/busybox\s+[A-Z]{4,}")),
     ("malware_family", "linux-cryptobot", 5, _r(
-        r"\b(kinsing|kdevtmpfsi|sysrv|sysrvv|dero(?:miner)?|z0miner|8220|watchdogs|xanthe|"
+        # "deromoner" (mandatory suffix), not bare "dero": Dero is a real,
+        # popular privacy coin that legitimate miners (xmrig, etc.) genuinely
+        # support and reference throughout their own source code, so a bare
+        # "dero" collides with that legitimate coin name (the pmietlicki/
+        # xmrig-nvidia false positive, matching xmrig's own AstroBWT/Dero
+        # mining-algorithm support code).
+        r"\b(kinsing|kdevtmpfsi|sysrv|sysrvv|deromoner|z0miner|8220|watchdogs|xanthe|"
         r"prometei|outlaw|rocke|teamtnt|tntcnc|hildegard|abcbot)\b")),
     ("malware_family", "worm-scanner", 3, _r(r"\b(masscan|zmap|zgrab|pnscan|unicornscan)\b")),
     ("malware_family", "redis-unauth", 3, _r(r"redis-cli\b[^\n]*(?:config\s+set|flushall|-h\s+\d)")),

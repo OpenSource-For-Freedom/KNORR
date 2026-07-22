@@ -77,6 +77,28 @@ def _rows(db: Database, status: str | None = None) -> list[dict]:
     return out
 
 
+def _telemetry(db: Database, limit: int = 60) -> list[dict]:
+    """Chronological run history for the telemetry graphs: one point per
+    completed hunt round, its search yield (candidates screened), and the
+    registry's confirmed count at that point in time. Confirmed count is NOT
+    purely monotonic: it dips when a precision fix lands and false positives
+    get rejected, not just grows as new images are found -- that trajectory
+    is exactly what the graph is for."""
+    rows = list(db.conn.execute(
+        "SELECT run_id, started_at, counts FROM runs "
+        "WHERE status='completed' AND counts IS NOT NULL "
+        "ORDER BY started_at DESC LIMIT ?", (limit,)))
+    out = []
+    for r in reversed(rows):  # chronological, oldest first
+        counts = json.loads(r["counts"] or "{}")
+        out.append({
+            "run_id": r["run_id"], "started_at": r["started_at"],
+            "candidates": counts.get("candidates", 0),
+            "confirmed_total": counts.get("confirmed_total", 0),
+        })
+    return out
+
+
 def _summary(db: Database) -> dict:
     rows = _rows(db)
     confirmed = [r for r in rows if r["status"] == "confirmed"]
@@ -145,6 +167,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self._json(_rows(db, "removed"))
                 elif path == "/api/all":
                     self._json(_rows(db))
+                elif path == "/api/telemetry":
+                    self._json(_telemetry(db))
                 else:
                     self._json({"error": "unknown endpoint"})
             finally:
@@ -172,7 +196,7 @@ _HTML = r"""<!doctype html>
   --canvas:#f3f5f8;--canvas-rgb:243,245,248;--surface:#ffffff;--surface-2:#f8fafc;--zebra:#fbfcfe;
   --border:#e2e7ee;--border-2:#ced6e0;--hair:#eef1f5;
   --text:#182430;--text-2:#57667a;--text-3:#8592a4;
-  --brand:#1c548f;--brand-2:#e8f0f8;
+  --brand:#1c548f;--brand-2:#e8f0f8;--series-2:#eb6834;
   --crit:#b3283a;--crit-bg:#fbe9eb;--high:#9a6712;--high-bg:#f7eede;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
   --mono:ui-monospace,"SF Mono","Cascadia Code",Consolas,monospace;
@@ -181,7 +205,7 @@ _HTML = r"""<!doctype html>
   --canvas:#0d1219;--canvas-rgb:13,18,25;--surface:#131a23;--surface-2:#0f161e;--zebra:#141c26;
   --border:#232d3a;--border-2:#303c4b;--hair:#1b232e;
   --text:#d7dee7;--text-2:#94a1b0;--text-3:#66717f;
-  --brand:#4f9bd8;--brand-2:#16222f;
+  --brand:#4f9bd8;--brand-2:#16222f;--series-2:#d95926;
   --crit:#e05669;--crit-bg:#2a1519;--high:#d29a44;--high-bg:#241c10;
 }}
 *{box-sizing:border-box}
@@ -220,6 +244,17 @@ a:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
 .bar-row .nm{width:140px;font-size:12px;text-transform:capitalize;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bar-row .tr{flex:1;height:8px;background:var(--surface-2);border:1px solid var(--hair)}
 .bar-row .fl{height:100%}.bar-row .v{width:28px;text-align:right;font-size:12px;color:var(--text-2);font-family:var(--mono)}
+.chart-box{position:relative;height:150px}
+.chart-box svg{display:block;overflow:visible}
+.chart-box circle.mark{fill:var(--surface);stroke-width:2;cursor:crosshair}
+.chart-box rect.mark{cursor:crosshair}
+.chart-box .xhair{stroke:var(--border-2);stroke-width:1;pointer-events:none;display:none}
+.chart-tip{position:absolute;pointer-events:none;background:var(--text);color:var(--surface);
+  font-size:11px;font-family:var(--mono);padding:5px 8px;white-space:nowrap;display:none;
+  transform:translate(-50%,-100%);margin-top:-8px;z-index:5;line-height:1.5}
+.chart-tip b{font-family:var(--sans);font-weight:600}
+.chart-foot{display:flex;justify-content:space-between;color:var(--text-3);font-size:10px;
+  font-family:var(--mono);margin-top:4px}
 .note{color:var(--text-2);font-size:12px;line-height:1.6}.note b{color:var(--text)}
 .tblwrap{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:760px}
@@ -266,6 +301,16 @@ tbody tr:nth-child(even){background:var(--zebra)}tbody tr:hover{background:var(-
     <div class="panel" style="margin:0"><div class="phead"><h2>Discovery source</h2>
       <span class="meta">how each finding surfaced</span></div><div class="pbody" id="meths"></div></div>
   </div>
+  <div class="rowg">
+    <div class="panel" style="margin:0"><div class="phead"><h2>Confirmed images over time</h2>
+      <span class="meta">registry size per run</span></div>
+      <div class="pbody"><div class="chart-box" id="chart-confirmed"></div>
+      <div class="chart-foot" id="chart-confirmed-foot"></div></div></div>
+    <div class="panel" style="margin:0"><div class="phead"><h2>Search yield per run</h2>
+      <span class="meta">candidates screened, by round</span></div>
+      <div class="pbody"><div class="chart-box" id="chart-candidates"></div>
+      <div class="chart-foot" id="chart-candidates-foot"></div></div></div>
+  </div>
   <div class="panel"><div class="phead"><h2>Confirmed detections</h2>
     <span class="meta" id="cmeta"></span></div>
     <div class="tblwrap"><table><thead><tr><th>Severity</th><th>Image</th><th>Registry</th>
@@ -289,6 +334,49 @@ function bar(nm,v,mx,c){const p=mx?Math.max(3,Math.round(v/mx*100)):0;
   return `<div class="bar-row"><div class="nm">${esc(nm.replace(/_/g," "))}</div>
    <div class="tr"><div class="fl" style="width:${p}%;background:${c}"></div></div><div class="v">${v}</div></div>`}
 const REGISTRY_LABEL={"docker.io":"Docker Hub","ghcr.io":"GHCR","github.com":"GitHub (Dockerfile)"};
+const fmtTime=iso=>{try{return new Date(iso).toLocaleString(undefined,
+  {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}catch(e){return iso||""}};
+// A small, dependency-free time-series chart (line or bar), single series,
+// with a hover crosshair + tooltip. mode:"line" connects points; mode:"bar"
+// draws thin sharp-cornered bars (matching this console's own flat, sharp-
+// edged aesthetic rather than the general rounded-bar default).
+function seriesChart(boxEl, footEl, data, key, color, mode){
+  if(!data.length){boxEl.innerHTML='<span class="note">no completed runs yet</span>';footEl.textContent="";return}
+  const w=Math.max(280, boxEl.clientWidth||560), h=150, pad={t:10,r:8,b:8,l:30};
+  const vals=data.map(d=>d[key]);
+  const maxV=Math.max(1,...vals), minV=Math.min(0,...vals);
+  const iw=w-pad.l-pad.r, ih=h-pad.t-pad.b;
+  const x=i=>pad.l+(data.length>1?iw*i/(data.length-1):iw/2);
+  const y=v=>pad.t+ih-(ih*(v-minV)/((maxV-minV)||1));
+  let grid="";
+  for(let i=0;i<=3;i++){const gy=pad.t+ih*i/3, gv=Math.round(maxV-(maxV-minV)*i/3);
+    grid+=`<line x1="${pad.l}" x2="${w-pad.r}" y1="${gy.toFixed(1)}" y2="${gy.toFixed(1)}" stroke="var(--hair)" stroke-width="1"/>`+
+      `<text x="2" y="${(gy+3).toFixed(1)}" font-size="9" fill="var(--text-3)" font-family="var(--mono)">${gv}</text>`;}
+  let marks="";
+  if(mode==="line"){
+    const path=data.map((d,i)=>(i?"L":"M")+x(i).toFixed(1)+","+y(d[key]).toFixed(1)).join(" ");
+    marks=`<path d="${path}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`+
+      data.map((d,i)=>`<circle class="mark" cx="${x(i).toFixed(1)}" cy="${y(d[key]).toFixed(1)}" r="2.5" stroke="${color}" data-i="${i}"/>`).join("");
+  } else {
+    const bw=Math.max(2, Math.min(18, iw/data.length-2));
+    marks=data.map((d,i)=>`<rect class="mark" x="${(x(i)-bw/2).toFixed(1)}" y="${y(d[key]).toFixed(1)}"
+      width="${bw.toFixed(1)}" height="${(pad.t+ih-y(d[key])).toFixed(1)}" fill="${color}" stroke="none" data-i="${i}"/>`).join("");
+  }
+  boxEl.innerHTML=`<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}">${grid}${marks}
+    <line class="xhair" x1="0" x2="0" y1="${pad.t}" y2="${pad.t+ih}"/></svg><div class="chart-tip"></div>`;
+  footEl.innerHTML=`<span>${esc(fmtTime(data[0].started_at))}</span><span>${esc(fmtTime(data[data.length-1].started_at))}</span>`;
+  const svg=boxEl.querySelector("svg"), xhair=boxEl.querySelector(".xhair"), tip=boxEl.querySelector(".chart-tip");
+  const nearest=px=>{let best=0,bd=Infinity;data.forEach((d,i)=>{const dd=Math.abs(x(i)-px);if(dd<bd){bd=dd;best=i}});return best};
+  svg.addEventListener("mousemove",e=>{
+    const r=svg.getBoundingClientRect(), px=(e.clientX-r.left)*(w/r.width), i=nearest(px);
+    const d=data[i];
+    xhair.style.display="block"; xhair.setAttribute("x1",x(i)); xhair.setAttribute("x2",x(i));
+    tip.style.display="block";
+    tip.style.left=((x(i)/w)*r.width)+"px"; tip.style.top=((y(d[key])/h)*r.height)+"px";
+    tip.innerHTML=`<b>${d[key]}</b> &middot; ${esc(fmtTime(d.started_at))}`;
+  });
+  svg.addEventListener("mouseleave",()=>{xhair.style.display="none";tip.style.display="none"});
+}
 async function load(){
   const s=await (await fetch('/api/summary')).json(); const t=s.totals;
   document.getElementById('run').innerHTML=`run <b>${esc(s.run||'-')}</b><br>static analysis &middot; images never executed`;
@@ -323,6 +411,11 @@ async function load(){
   const rem=await (await fetch('/api/removed')).json();
   document.getElementById('rmeta').textContent=`${rem.length} OSM-flagged images returned 401/404 at pull`;
   document.getElementById('removed').innerHTML=rem.length?rem.map(x=>`<span class="r">${esc(x.image)}</span>`).join("   "):"none";
+  const tel=await (await fetch('/api/telemetry')).json();
+  seriesChart(document.getElementById('chart-confirmed'), document.getElementById('chart-confirmed-foot'),
+    tel, 'confirmed_total', 'var(--brand)', 'line');
+  seriesChart(document.getElementById('chart-candidates'), document.getElementById('chart-candidates-foot'),
+    tel, 'candidates', 'var(--series-2)', 'bar');
 }
 load(); setInterval(load,15000);
 </script>

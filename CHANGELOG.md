@@ -7,6 +7,13 @@ discovery pipeline, and a public long-running watch mode.
 
 ### Added
 
+- **Dashboard run telemetry** (`/api/telemetry`, a new dependency-free SVG
+  chart component): a "Confirmed images over time" line and a "Search yield
+  per run" bar, one point per completed hunt round. The confirmed-count line
+  is deliberately not smoothed into pure growth: a precision fix that rejects
+  false positives shows up as a real dip, not just additions. Hover shows a
+  crosshair + tooltip on both; dark mode uses its own validated color steps
+  rather than an automatic flip.
 - **Non-crypto discovery**, closing a structural bias found via the
   dashboard's own threat-facet breakdown (590 cryptomining vs. single digits
   everywhere else): `DEFAULT_SEARCH_TERMS`/`DEFAULT_GHCR_TERMS` gained IoT-

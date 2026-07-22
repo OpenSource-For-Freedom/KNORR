@@ -53,19 +53,35 @@ _IGNORE_LAYER_PATH = re.compile(
     # OpenSSL's generated fipskey.h (a hex FIPS key constant, not shellcode) slip
     # through and false-positive on aquasec/codesec-remediation (score 50).
     r"(^|/)(usr/(share|lib|lib64|include|src)|usr/local/(share|lib|lib64|include|src|go)|"
-    r"lib|lib64|var/lib/dpkg|site-packages|dist-packages|node_modules/[^/]+/(docs?|test)|"
+    r"lib|lib64|var/lib/dpkg|site-packages|dist-packages|"
     r"perl\d?|perl-base|unicore|man\d?)(/|$)"
     r"|/doc/|copyright$|changelog(\.\w+)?$|(^|/)LICENSE|\.pod$|\.1$|\.3$|\.md$"
     r"|(^|/)(README|INSTALL|NEWS|AUTHORS)(\.\w+)?$"
     r"|_test\.go$"
-    # Security/APM vendor instrumentation configs legitimately NAME the malware
-    # families and attack patterns they detect (a WAF ruleset listing "mirai",
-    # "gafgyt", etc. as signatures to watch for) -- describing an attack is not
-    # committing one (the same principle as a comment never confirming, applied
-    # to a security tool's own detection-rule data). Observed on dd-trace's
-    # appsec/recommended.json inside aquasec/codesec-remediation.
-    r"|node_modules/(?:@datadog/|dd-trace/|@sentry/|newrelic/|elastic-apm-node/)"
     r"|appsec/recommended\.json$"
+    # node_modules, wholesale: minified/bundled third-party JS library code is
+    # a dense false-positive generator across MULTIPLE rule categories, not
+    # just one. Standard Unicode character-code tables (html-entities,
+    # entities) contain the literal numeral "8220" (also the "8220 Gang"
+    # malware-family term) as an ordinary codepoint value; the Public Suffix
+    # List package (psl) trips c2-framework; legitimate byte-level crypto/
+    # image libraries (tweetnacl, image-js) produce long hex runs that read as
+    # shellcode-blob; Next.js's own bundled devtools even tripped the Tier-A
+    # confirm-alone reverse_shell/nc-exec rule. 4/4 confirmed images carrying
+    # node_modules evidence were false positives on well-known open source
+    # packages (Next.js, LangChain, Vue, Vite, Prisma, fluent-ffmpeg). The
+    # project already has the right tool for a genuinely malicious npm
+    # dependency: SBOM/malicious-package matching against OSM's own catalog
+    # (scanning/iocs.py's sbom_match), not blind content pattern-matching
+    # over every vendored package's internals.
+    r"|(^|/)node_modules/"
+    # Next.js's own compiled production build output (minified/bundled JS
+    # chunks) and npm's own local package-download cache: both proven
+    # false-positive generators for the exact same reason as node_modules
+    # above, just outside it (miraijr/son-tota's .next/static/chunks/ tripped
+    # reverse_shell/nc-exec; danish-mar/astr's .npm/_cacache/ tripped
+    # linux-cryptobot on an npm registry-request cache entry's hash/JSON).
+    r"|(^|/)\.next/|(^|/)\.npm/_cacache/"
     # GNU autotools' generated boilerplate (config.sub/config.guess carry the
     # exact same FSF copyright/portability-triplet text across every autotools
     # project regardless of what it builds) and CMake's own auto-generated

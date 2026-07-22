@@ -7,6 +7,15 @@ discovery pipeline, and a public long-running watch mode.
 
 ### Added
 
+- **Non-crypto discovery**, closing a structural bias found via the
+  dashboard's own threat-facet breakdown (590 cryptomining vs. single digits
+  everywhere else): `DEFAULT_SEARCH_TERMS`/`DEFAULT_GHCR_TERMS` gained IoT-
+  botnet, named-rootkit, and generic backdoor/webshell vocabulary, and `knorr
+  watch` now rotates a `dockerfiles` round (the GitHub Dockerfile-code scan,
+  the one source built for reverse-shell/C2/dropper threats) alongside
+  docker/ghcr by default. The Dockerfile-hit-to-finding mapping moved from
+  `cli.py` to the shared `scanning/dockerfile.py` (`finding_from_hit`) so both
+  the CLI command and the new watch round use the same code.
 - **OSM cross-check in the confirm path** (`hunt.py`'s `_osm_cross_check`, both
   Tier-1 and Tier-2 confirm sites): every freshly-confirmed finding now gets a
   live lookup against OSM's own database. A VERIFIED report for the exact same
@@ -119,6 +128,34 @@ discovery pipeline, and a public long-running watch mode.
   and vendored third-party libraries under `thirdparty/`) were misread as
   malware-family/rootkit/C2/obfuscation signals on `marcomsousa/sqlmap`, a
   mainstream, legal SQL-injection testing tool.
+- **`node_modules`/framework build output false-confirming malware, wholesale.**
+  Minified/bundled JavaScript inside `node_modules` (and Next.js's own
+  `.next/` build output, and npm's own `.npm/_cacache/` package cache) was a
+  dense false-positive generator across multiple rule categories: the numeral
+  `8220` (also the "8220 Gang" cryptojacking term, tightened to require
+  `8220gang`/`8220 gang`) is also the Unicode codepoint for a curly quote, so
+  it appears in essentially every JS character-encoding table as ordinary
+  data; the Public Suffix List package tripped `c2-framework`; legitimate
+  byte-level crypto/image libraries (tweetnacl, image-js) tripped
+  `obfuscation/shellcode-blob`; Next.js's own bundled devtools even tripped
+  the Tier-A confirm-alone `reverse_shell/nc-exec` rule. `node_modules/`,
+  `.next/`, and `.npm/_cacache/` are now excluded wholesale from Tier-2
+  content scanning (a genuinely malicious npm dependency is still caught by
+  the existing SBOM/malicious-package match against OSM's catalog, a more
+  precise mechanism than content pattern-matching over vendored internals).
+  4 confirmed images rejected: `alpha317/napgram`, `miraijr/son-tota`,
+  `ghcr.io/danish-mar/astr`, and `refactr/runner-pool` (whose own webpack
+  `build/` output carried the same Unicode-table collision, plus a match on
+  the AWS SDK's own legitimate credential-provider internals; it was also
+  never genuinely about cryptomining, `hub_search`'s `"mining pool"` term
+  loosely matched its unrelated CI/CD "runner pool" naming).
+
+### Known issues
+
+- `exfiltration/curl-post-data` is too permissive across long, flattened
+  multi-command `RUN` lines: it matched a stock Debian/Node.js base-image
+  `apt-get install curl wget ca-certificates` step (`refactr/runner-pool`).
+  Needs its own follow-up; not fixed in this pass.
 
 ## 0.0.1
 

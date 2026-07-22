@@ -43,6 +43,11 @@ DEFAULT_GHCR_TERMS = (
     "supportxmr", "randomx", "monero",
     # known campaigns / droppers
     "kinsing", "kdevtmpfsi", "teamtnt", "watchdog",
+    # Non-crypto threat vocabulary (parity with discovery.py's same addition):
+    # IoT/generic botnet families and named rootkits, image-name-shaped.
+    "mirai", "gafgyt", "bashlite", "mozi", "hajime",
+    "diamorphine", "reptile", "azazel",
+    "reverseshell", "webshell", "backdoor",
 )
 
 

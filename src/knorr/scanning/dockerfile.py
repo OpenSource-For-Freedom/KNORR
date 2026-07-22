@@ -122,3 +122,38 @@ def scan_dockerfiles(client, queries=DOCKERFILE_QUERIES, *, per_query: int = 15,
         if i < len(queries) - 1:
             time.sleep(pace)
     return hits
+
+
+def finding_from_hit(hit: DockerfileHit):
+    """Map a DockerfileHit onto the same ImageFinding record the registry hunt
+    uses, so malicious Dockerfile code shows up in the SAME registry (and
+    dashboard, and `knorr watch` alerts) as malicious images, instead of only
+    ever being printed to a console and forgotten. Keyed
+    ``github.com/<owner>/<repo>:<path>`` (not a pullable OCI image; this
+    artifact is a source file, not a container), with the GitHub blob URL
+    stashed in evidence for the dashboard link. Shared by ``cli.py``'s
+    ``knorr dockerfiles`` command and ``watch.py``'s periodic dockerfile round.
+    """
+    from ..models import DetectionMethod, FindingStatus, ImageFinding
+
+    if hit.confirmed:
+        status = FindingStatus.CONFIRMED
+    elif hit.score >= 4:
+        status = FindingStatus.SCREENED
+    else:
+        status = FindingStatus.CANDIDATE
+    cats = sorted({s.split("/")[0] for s in hit.signals})
+    return ImageFinding(
+        image=f"github.com/{hit.repo}:{hit.path}".casefold(),
+        reference=hit.path,
+        detection_method=DetectionMethod.DOCKERFILE_SCAN,
+        status=status,
+        score=hit.score,
+        signals=list(hit.signals),
+        publisher=hit.repo.split("/", 1)[0].casefold(),
+        tier=hit.tier,
+        confirming=list(hit.confirming),
+        reasoning=f"malicious Dockerfile code in {hit.repo}/{hit.path} "
+                 f"(facets: {', '.join(cats) or '-'})",
+        evidence={"dockerfile_url": hit.url, "path": hit.path},
+    )

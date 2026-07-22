@@ -142,6 +142,25 @@ def test_linux_cryptobot_deromoner_family_matches():
     assert any(s.rule == "linux-cryptobot" for s in sigs)
 
 
+def test_linux_cryptobot_8220_gang_matches():
+    sigs = scan_config(_cfg(history=["known 8220 gang dropper payload"]))
+    assert any(s.rule == "linux-cryptobot" for s in sigs)
+    sigs2 = scan_config(_cfg(history=["known 8220gang dropper payload"]))
+    assert any(s.rule == "linux-cryptobot" for s in sigs2)
+
+
+def test_linux_cryptobot_bare_8220_does_not_match():
+    """8220 is also the Unicode codepoint for a curly quote (U+2018-201D), so
+    it appears in essentially every JS character-encoding table as ordinary
+    data; a bare "8220" must not confirm linux-cryptobot (the
+    refactr/runner-pool false positive, matching a bundled Unicode
+    codepoint-map table: '"147":8220,"148":8221')."""
+    sigs = scan_config(_cfg(history=[
+        'exports.decodeMap={"146":8217,"147":8220,"148":8221,"149":8226}',
+    ]))
+    assert not any(s.rule == "linux-cryptobot" for s in sigs)
+
+
 def test_linux_cryptobot_bare_dero_does_not_match():
     """Dero is a real, popular privacy coin that legitimate miners (xmrig,
     etc.) genuinely support and reference in their own source; a bare "dero"

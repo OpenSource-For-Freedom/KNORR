@@ -32,9 +32,20 @@ from knorr.scanning.tier2 import _IGNORE_LAYER_PATH
     "lib/x86_64-linux-gnu/libc.so.6",
     "lib64/ld-linux-x86-64.so.2",
     "var/lib/dpkg/info/base-files.list",
-    # Node module docs / tests
+    # node_modules, wholesale: minified/bundled third-party JS is a dense
+    # false-positive generator across multiple rule categories (the
+    # refactr/runner-pool, alpha317/napgram, miraijr/son-tota,
+    # danish-mar/astr cluster: Next.js, LangChain, Vue, Vite, Prisma,
+    # fluent-ffmpeg, tweetnacl, psl, html-entities all misread as malware).
     "node_modules/express/docs/api.md",
     "node_modules/lodash/test/test.js",
+    "app/node_modules/.pnpm/psl@1.9.0/node_modules/psl/dist/psl.js",
+    "app/node_modules/next/dist/compiled/next-devtools/index.js",
+    "app/node_modules/.pnpm/tweetnacl@0.14.5/node_modules/tweetnacl/nacl.js",
+    "app/node_modules/fluent-ffmpeg/coverage/tmp/coverage-123.json",
+    # Next.js's own compiled build output and npm's own package cache
+    "app/.next/static/chunks/dc40f32ba57c75fe.js",
+    "root/.npm/_cacache/index-v5/34/be/e542371e1aa84f2a351de966d3a9e6c5969ed89",
     # Perl unicode tables
     "usr/lib/perl5/unicore/lib/Jt/C.pl",
     "perl5/site_perl/unicore/UnicodeData.txt",

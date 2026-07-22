@@ -93,45 +93,11 @@ def _cmd_hunt(args: argparse.Namespace) -> int:
     return run_hunt(args)
 
 
-def _finding_from_dockerfile_hit(hit):
-    """Map a DockerfileHit onto the same ImageFinding record the registry hunt
-    uses, so malicious Dockerfile code shows up in the SAME registry (and
-    dashboard) as malicious images, instead of only ever being printed to a
-    console and forgotten. Keyed ``github.com/<owner>/<repo>:<path>`` (not a
-    pullable OCI image; this artifact is a source file, not a container), with
-    the GitHub blob URL stashed in evidence for the dashboard link.
-    """
-    from .models import DetectionMethod, FindingStatus, ImageFinding
-
-    if hit.confirmed:
-        status = FindingStatus.CONFIRMED
-    elif hit.score >= 4:
-        status = FindingStatus.SCREENED
-    else:
-        status = FindingStatus.CANDIDATE
-    cats = sorted({s.split("/")[0] for s in hit.signals})
-    f = ImageFinding(
-        image=f"github.com/{hit.repo}:{hit.path}".casefold(),
-        reference=hit.path,
-        detection_method=DetectionMethod.DOCKERFILE_SCAN,
-        status=status,
-        score=hit.score,
-        signals=list(hit.signals),
-        publisher=hit.repo.split("/", 1)[0].casefold(),
-        tier=hit.tier,
-        confirming=list(hit.confirming),
-        reasoning=f"malicious Dockerfile code in {hit.repo}/{hit.path} "
-                 f"(facets: {', '.join(cats) or '-'})",
-        evidence={"dockerfile_url": hit.url, "path": hit.path},
-    )
-    return f
-
-
 def _cmd_dockerfiles(args: argparse.Namespace) -> int:
     """Scan GitHub for malicious Dockerfile CODE (non-crypto: revshell/C2/exfil/dropper)."""
     from .db import Database
     from .feeds.github import GitHubClient
-    from .scanning.dockerfile import scan_dockerfiles
+    from .scanning.dockerfile import finding_from_hit, scan_dockerfiles
 
     if not config.GITHUB_TOKEN:
         print("error: no GitHub token (set KN_GITHUB_TOKEN / GW_GITHUB_TOKEN).")
@@ -146,7 +112,7 @@ def _cmd_dockerfiles(args: argparse.Namespace) -> int:
         hits = scan_dockerfiles(GitHubClient(), per_query=args.per_query, pace=args.pace,
                                 known=known, progress=lambda m: print(m, file=sys.stderr))
         for hit in hits:
-            db.upsert_finding(_finding_from_dockerfile_hit(hit), run_id)
+            db.upsert_finding(finding_from_hit(hit), run_id)
     finally:
         db.close()
 
@@ -245,8 +211,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Total seconds to run (default 7200 = 2h).")
     watch_p.add_argument("--interval", type=float, default=600.0,
                          help="Seconds to pause between rounds (default 600 = 10m).")
-    watch_p.add_argument("--registries", default="docker,ghcr",
-                         help="Comma-separated registries to rotate through each round.")
+    watch_p.add_argument("--registries", default="docker,ghcr,dockerfiles",
+                         help="Comma-separated sources to rotate through each round: "
+                              "'docker'/'ghcr' hunt those registries, 'dockerfiles' runs "
+                              "the non-crypto GitHub Dockerfile-code scan.")
     watch_p.set_defaults(func=_cmd_watch)
     return parser
 

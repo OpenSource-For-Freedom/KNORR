@@ -33,6 +33,16 @@ DEFAULT_SEARCH_TERMS = (
     "cryptonight", "supportxmr", "nicehash", "unmineable",
     # known campaigns / droppers
     "kinsing", "kdevtmpfsi", "teamtnt", "watchdog miner",
+    # Non-crypto threat vocabulary: without these, keyword search is
+    # structurally biased toward cryptomining (miners are commonly named
+    # after their own tool; other malware classes are not), so confirmed
+    # findings skew almost entirely cryptojacking regardless of what is
+    # actually out there. IoT/generic botnet families and named rootkits
+    # (the same vocabulary config_scan.py already knows how to confirm), plus
+    # generic backdoor/webshell terms.
+    "mirai", "gafgyt", "bashlite", "mozi", "hajime",
+    "diamorphine rootkit", "reptile rootkit", "azazel rootkit",
+    "reverse shell", "webshell", "backdoor",
 )
 
 # Official/Verified images most impersonated; the typosquat detector's anchors.

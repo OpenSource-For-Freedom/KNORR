@@ -180,6 +180,36 @@ def _run_one_hunt(registry: str, db_path: Path, tier1_limit: int, limit: int, pa
         log.exception("hunt round failed (registry=%s); continuing to the next round", registry)
 
 
+def _run_dockerfile_round(db_path: Path, per_query: int = 20, pace: float = 7.0) -> None:
+    """One Dockerfile-scan round: mine GitHub code search for malicious
+    Dockerfile CODE (reverse shells, C2, droppers, exfil) instead of a
+    cryptomining-biased registry keyword search -- the one discovery source
+    built specifically to catch what that search structurally misses (see
+    scanning/dockerfile.py's module docstring). Exception-guarded like
+    _run_one_hunt, so a bad round (no GITHUB_TOKEN, a rate limit, a network
+    blip) is logged and skipped, never kills the watch loop.
+    """
+    from .db import Database
+    from .feeds.github import GitHubClient
+    from .scanning.dockerfile import finding_from_hit, scan_dockerfiles
+
+    try:
+        db = Database.open(db_path)
+        try:
+            known = {img[len("github.com/"):] for img in db.known_images()
+                     if img.startswith("github.com/")}
+            hits = scan_dockerfiles(GitHubClient(), per_query=per_query, pace=pace, known=known)
+            run_id = f"watch-dockerfiles-{int(time.time())}"
+            for hit in hits:
+                db.upsert_finding(finding_from_hit(hit), run_id)
+        finally:
+            db.close()
+        log.info("dockerfile round: %d hit(s) persisted (%d file(s) already known)",
+                 len(hits), len(known))
+    except Exception:  # noqa: BLE001
+        log.exception("dockerfile round failed; continuing to the next round")
+
+
 def watch(
     *, duration_seconds: int, db_path: Path, webhook: str | None,
     registries: list[str], round_pause: float = 600.0,
@@ -222,6 +252,13 @@ def watch(
                 _run_one_hunt("docker", db_path, min(150, max(20, budget - 10)), 3, 0.2)
             else:
                 log.info("docker pull budget low (~%d); skipping this round", budget)
+        elif registry == "dockerfiles":
+            # The non-crypto discovery angle: Docker Hub/GHCR keyword search
+            # is structurally biased toward cryptomining (miners are commonly
+            # named after their own tool; reverse shells/C2/droppers are not),
+            # so without this round confirmed findings skew almost entirely
+            # cryptojacking regardless of what is actually out there.
+            _run_dockerfile_round(db_path)
         else:
             # GHCR has no daemon-side pull budget to protect (unlike Docker
             # Hub), so its round is sized by the widened DEFAULT_GHCR_TERMS

@@ -214,7 +214,14 @@ _RULES: tuple[tuple[str, str, int, re.Pattern[str]], ...] = (
         # "dero" collides with that legitimate coin name (the pmietlicki/
         # xmrig-nvidia false positive, matching xmrig's own AstroBWT/Dero
         # mining-algorithm support code).
-        r"\b(kinsing|kdevtmpfsi|sysrv|sysrvv|deromoner|z0miner|8220|watchdogs|xanthe|"
+        # "8220gang"/"8220 gang" (the actual threat-actor name), not a bare
+        # "8220": that numeral is also the Unicode codepoint for a curly
+        # quote (U+2018-201D), so it appears in essentially every JS
+        # character-encoding table (html-entities, entities, and any bundled
+        # bundle embedding one) as ordinary data, not a threat-actor
+        # reference (the refactr/runner-pool false positive; the SAME numeral
+        # false-confirmed via html-entities/entities in node_modules too).
+        r"\b(kinsing|kdevtmpfsi|sysrv|sysrvv|deromoner|z0miner|8220[\s-]?gang|watchdogs|xanthe|"
         r"prometei|outlaw|rocke|teamtnt|tntcnc|hildegard|abcbot)\b")),
     ("malware_family", "worm-scanner", 3, _r(r"\b(masscan|zmap|zgrab|pnscan|unicornscan)\b")),
     ("malware_family", "redis-unauth", 3, _r(r"redis-cli\b[^\n]*(?:config\s+set|flushall|-h\s+\d)")),

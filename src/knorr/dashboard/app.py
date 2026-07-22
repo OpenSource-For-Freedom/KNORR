@@ -107,9 +107,14 @@ def _summary(db: Database) -> dict:
     cat_counter: Counter = Counter()
     method_counter: Counter = Counter()
     registry_counter: Counter = Counter()
+    publisher_counter: Counter = Counter()
+    severity_counter: Counter = Counter()
     for r in confirmed:
         method_counter[r["detection_method"]] += 1
         registry_counter[r["registry"]] += 1
+        if r["publisher"]:
+            publisher_counter[r["publisher"]] += 1
+        severity_counter["critical" if (r["tier"] or "").startswith("A") else "high"] += 1
         for sig in r["signals"]:
             cat_counter[sig.split("/", 1)[0]] += 1
     novel = [r for r in confirmed
@@ -124,9 +129,36 @@ def _summary(db: Database) -> dict:
         "by_category": cat_counter.most_common(),
         "by_method": method_counter.most_common(),
         "by_registry": registry_counter.most_common(),
+        "by_publisher": publisher_counter.most_common(10),
+        "by_severity": severity_counter.most_common(),
         "run": runs[0]["run_id"] if runs else "",
         "counts": json.loads(runs[0]["counts"]) if runs and runs[0]["counts"] else {},
     }
+
+
+def _packages(db: Database) -> list[dict]:
+    """Malicious-dependency intel aggregated across every finding's Trivy SBOM
+    match: which OSM-listed malicious package (ecosystem/name/version) was
+    found actually installed in which image(s). The searchable
+    Dependency/Package Report -- the container-level view of what git_paca
+    tracks at the package-registry level. Empty until a hunt runs with SBOM
+    matching enabled (`knorr watch` always enables it; `knorr hunt` needs
+    `--sources ...,osm_package`) and Trivy is installed.
+    """
+    agg: dict[tuple, dict] = {}
+    for r in db.conn.execute("SELECT image, status, evidence FROM image_findings"):
+        evidence = json.loads(r["evidence"] or "{}")
+        for hit in evidence.get("sbom_hits") or []:
+            key = (hit.get("ecosystem"), hit.get("name"), hit.get("version"))
+            entry = agg.setdefault(key, {
+                "ecosystem": hit.get("ecosystem"), "name": hit.get("name"),
+                "version": hit.get("version"), "images": []})
+            entry["images"].append({
+                "image": r["image"], "status": r["status"],
+                "link": _link_for(r["image"], evidence)})
+    out = list(agg.values())
+    out.sort(key=lambda d: -len(d["images"]))
+    return out
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -169,6 +201,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self._json(_rows(db))
                 elif path == "/api/telemetry":
                     self._json(_telemetry(db))
+                elif path == "/api/packages":
+                    self._json(_packages(db))
                 else:
                     self._json({"error": "unknown endpoint"})
             finally:
@@ -256,6 +290,14 @@ a:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
 .chart-foot{display:flex;justify-content:space-between;color:var(--text-3);font-size:10px;
   font-family:var(--mono);margin-top:4px}
 .note{color:var(--text-2);font-size:12px;line-height:1.6}.note b{color:var(--text)}
+.subhead{margin:0 0 6px;color:var(--text-3);font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+.subhead:not(:first-child){margin-top:16px}
+.search{width:100%;box-sizing:border-box;background:var(--surface-2);border:1px solid var(--border-2);
+  color:var(--text);font-family:var(--sans);font-size:12.5px;padding:8px 12px;margin-bottom:12px}
+.search:focus{outline:2px solid var(--brand);outline-offset:-1px}
+.search::placeholder{color:var(--text-3)}
+.pkgimgs{display:flex;flex-direction:column;gap:2px}
+.pkgimgs a{font-family:var(--mono);font-size:11px}
 .tblwrap{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:760px}
 thead th{text-align:left;color:var(--text-3);font-weight:600;font-size:10.5px;letter-spacing:.05em;
@@ -311,6 +353,24 @@ tbody tr:nth-child(even){background:var(--zebra)}tbody tr:hover{background:var(-
       <div class="pbody"><div class="chart-box" id="chart-candidates"></div>
       <div class="chart-foot" id="chart-candidates-foot"></div></div></div>
   </div>
+  <div class="rowg">
+    <div class="panel" style="margin:0"><div class="phead"><h2>Registry &amp; severity</h2>
+      <span class="meta">confirmed images, by surface</span></div>
+      <div class="pbody">
+        <p class="subhead">Registry</p><div id="regs"></div>
+        <p class="subhead">Severity</p><div id="sevs"></div>
+      </div></div>
+    <div class="panel" style="margin:0"><div class="phead"><h2>Top confirmed publishers</h2>
+      <span class="meta">compounding pivot targets</span></div><div class="pbody" id="pubs"></div></div>
+  </div>
+  <div class="panel"><div class="phead"><h2>Package intelligence</h2>
+    <span class="meta" id="pkgmeta"></span></div>
+    <div class="pbody" style="padding-bottom:0">
+      <input type="search" id="pkgsearch" class="search" placeholder="Search by package, ecosystem, or image&hellip;">
+    </div>
+    <div class="tblwrap"><table><thead><tr><th>Ecosystem</th><th>Package</th><th>Version</th>
+      <th class="num">Images</th><th>Found in</th></tr></thead>
+      <tbody id="pkgrows"></tbody></table></div></div>
   <div class="panel"><div class="phead"><h2>Confirmed detections</h2>
     <span class="meta" id="cmeta"></span></div>
     <div class="tblwrap"><table><thead><tr><th>Severity</th><th>Image</th><th>Registry</th>
@@ -392,6 +452,12 @@ async function load(){
   const mmx=Math.max(1,...s.by_method.map(x=>x[1]));
   document.getElementById('meths').innerHTML=(s.by_method.map(([m,n])=>bar(m,n,mmx,"var(--brand)")).join(""))+
     `<p class="note" style="margin:14px 0 0">Tier 1 reads the image config only (no layer pull); Tier 2 pulls and unpacks layers. A miner is confirmed only when a payout wallet or pool is hardcoded, so a legitimate miner tool is <b>not</b> flagged.</p>`;
+  const rgmx=Math.max(1,...s.by_registry.map(x=>x[1]));
+  document.getElementById('regs').innerHTML=s.by_registry.map(([r,n])=>bar(REGISTRY_LABEL[r]||r,n,rgmx,"var(--brand)")).join("")||'<span class="note">no data</span>';
+  const sevmx=Math.max(1,...s.by_severity.map(x=>x[1]));
+  document.getElementById('sevs').innerHTML=s.by_severity.map(([sv,n])=>bar(sv,n,sevmx,sv==="critical"?"var(--crit)":"var(--high)")).join("")||'<span class="note">no data</span>';
+  const pubmx=Math.max(1,...s.by_publisher.map(x=>x[1]));
+  document.getElementById('pubs').innerHTML=s.by_publisher.map(([p,n])=>bar(p,n,pubmx,"var(--series-2)")).join("")||'<span class="note">no data</span>';
   const rows=await (await fetch('/api/confirmed')).json();
   document.getElementById('cmeta').textContent=`${rows.length} images · confirmed by static evidence`;
   document.getElementById('rows').innerHTML=rows.map(x=>{
@@ -416,7 +482,28 @@ async function load(){
     tel, 'confirmed_total', 'var(--brand)', 'line');
   seriesChart(document.getElementById('chart-candidates'), document.getElementById('chart-candidates-foot'),
     tel, 'candidates', 'var(--series-2)', 'bar');
+  ALL_PACKAGES=await (await fetch('/api/packages')).json();
+  applyPackageFilter();
 }
+let ALL_PACKAGES=[];
+function renderPackages(pkgs){
+  document.getElementById('pkgmeta').textContent=
+    `${pkgs.length} known-malicious dependenc${pkgs.length===1?'y':'ies'} found installed, Trivy SBOM match against OSM`;
+  document.getElementById('pkgrows').innerHTML=pkgs.map(p=>{
+    const imgs=p.images.slice(0,4).map(im=>`<a href="${esc(im.link)}" target="_blank" rel="noopener">${esc(im.image)}</a>`).join("")+
+      (p.images.length>4?`<span class="more">+${p.images.length-4} more</span>`:"");
+    return `<tr><td class="src">${esc(p.ecosystem)}</td><td class="img">${esc(p.name)}</td>
+      <td class="tierlbl">${esc(p.version)}</td><td class="num score">${p.images.length}</td>
+      <td><div class="pkgimgs">${imgs}</div></td></tr>`;
+  }).join("")||`<tr><td colspan="5" class="note">no malicious dependencies found yet, SBOM matching runs during Tier-2 (needs Trivy installed; <code>knorr watch</code> enables it by default)</td></tr>`;
+}
+function applyPackageFilter(){
+  const q=document.getElementById('pkgsearch').value.trim().toLowerCase();
+  renderPackages(q?ALL_PACKAGES.filter(p=>
+    p.name.toLowerCase().includes(q) || p.ecosystem.toLowerCase().includes(q) ||
+    p.images.some(im=>im.image.toLowerCase().includes(q))):ALL_PACKAGES);
+}
+document.getElementById('pkgsearch').addEventListener('input',applyPackageFilter);
 load(); setInterval(load,15000);
 </script>
 </body></html>"""

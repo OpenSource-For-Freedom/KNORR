@@ -7,6 +7,17 @@ discovery pipeline, and a public long-running watch mode.
 
 ### Added
 
+- **Package Intelligence** (`/api/packages`), a searchable Dependency/Package
+  Report: every Trivy SBOM match against OSM's malicious-package catalog,
+  aggregated by package (ecosystem, name, version) with the confirmed image(s)
+  it was found installed in. The container-level view of what `git_paca`
+  tracks at the package-registry level. `knorr watch` now always enables SBOM
+  matching (`osm_package`, previously never on in the watch loop), so this
+  starts populating from real hunts; degrades to empty (not broken) when
+  Trivy isn't installed.
+- Dashboard fill-out: **Registry & Severity** and **Top Confirmed Publishers**
+  panels (the compounding-pivot leaderboard), using space that previously
+  sat empty.
 - **Dashboard run telemetry** (`/api/telemetry`, a new dependency-free SVG
   chart component): a "Confirmed images over time" line and a "Search yield
   per run" bar, one point per completed hunt round. The confirmed-count line

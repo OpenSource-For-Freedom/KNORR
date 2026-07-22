@@ -168,10 +168,17 @@ def _alert_embed(row) -> dict:
 
 def _run_one_hunt(registry: str, db_path: Path, tier1_limit: int, limit: int, pace: float) -> None:
     """One hunt round, in-process. Exception-guarded: a crash here (a network
-    blip, a hung Trivy call) is logged and skipped, never kills the watch loop."""
+    blip, a hung Trivy call) is logged and skipped, never kills the watch loop.
+
+    ``osm_package`` is always on: it loads OSM's malicious-package catalog and
+    runs the Trivy SBOM match on every Tier-2-pulled image (a genuinely
+    malicious npm/pypi/etc. dependency baked in), feeding the dashboard's
+    package-intel panel. It degrades to a no-op, not a failure, when Trivy
+    isn't installed (``trivy_sbom`` returns [] via ``shutil.which``).
+    """
     from .hunt import run_hunt
     args = argparse.Namespace(
-        registry=registry, db=db_path, sources="search,publisher", scan=True,
+        registry=registry, db=db_path, sources="search,publisher,osm_package", scan=True,
         tier1_limit=tier1_limit, limit=limit, pace=pace, run_id=None, ghcr_accounts=None,
     )
     try:

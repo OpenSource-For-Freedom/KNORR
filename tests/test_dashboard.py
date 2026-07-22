@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-from knorr.dashboard.app import _telemetry
+from knorr.dashboard.app import _packages, _summary, _telemetry
 from knorr.db import Database
+from knorr.models import DetectionMethod, FindingStatus, ImageFinding
 
 
 @pytest.fixture
@@ -24,6 +25,16 @@ def _run(db_, run_id, started_at, *, finished=True, counts=None):
     db_.start_run(run_id, started_at)
     if finished:
         db_.finish_run(run_id, started_at, counts or {})
+
+
+def _confirmed(db_, image, *, tier="A:cryptojacking", publisher=None, evidence=None):
+    f = ImageFinding(
+        image=image, status=FindingStatus.CONFIRMED, tier=tier,
+        detection_method=DetectionMethod.HUB_SEARCH,
+        publisher=publisher or image.split("/", 1)[0],
+        evidence=evidence or {},
+    )
+    db_.upsert_finding(f, "run-1")
 
 
 def test_telemetry_empty_db_returns_empty(db):
@@ -75,3 +86,98 @@ def test_telemetry_confirmed_total_can_dip(db):
     _run(db, "r2", "2026-07-02T00:00:00Z", counts={"confirmed_total": 43})
     tel = _telemetry(db)
     assert [t["confirmed_total"] for t in tel] == [50, 43]
+
+
+# ---------------------------------------------------------------------------
+# _summary: by_publisher / by_severity (the fill-the-screen additions)
+# ---------------------------------------------------------------------------
+
+def test_summary_by_publisher_counts_confirmed_only(db):
+    _confirmed(db, "evil/a", publisher="evil")
+    _confirmed(db, "evil/b", publisher="evil")
+    _confirmed(db, "nice/x", publisher="nice")
+    s = _summary(db)
+    assert dict(s["by_publisher"])["evil"] == 2
+    assert dict(s["by_publisher"])["nice"] == 1
+
+
+def test_summary_by_publisher_top_10_only(db):
+    for i in range(15):
+        _confirmed(db, f"pub{i}/img", publisher=f"pub{i}")
+    s = _summary(db)
+    assert len(s["by_publisher"]) == 10
+
+
+def test_summary_by_severity_tier_a_is_critical(db):
+    _confirmed(db, "evil/a", tier="A:reverse_shell")
+    s = _summary(db)
+    assert dict(s["by_severity"])["critical"] == 1
+
+
+def test_summary_by_severity_tier_b_is_high(db):
+    _confirmed(db, "evil/a", tier="B:steal-and-send")
+    s = _summary(db)
+    assert dict(s["by_severity"])["high"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _packages: the searchable Dependency/Package Report (DPR)
+# ---------------------------------------------------------------------------
+
+def test_packages_empty_when_no_sbom_hits(db):
+    _confirmed(db, "evil/a")
+    assert _packages(db) == []
+
+
+def test_packages_aggregates_a_single_hit(db):
+    _confirmed(db, "evil/a", evidence={"sbom_hits": [
+        {"ecosystem": "npm", "name": "evil-pkg", "version": "1.0.0"}]})
+    pkgs = _packages(db)
+    assert len(pkgs) == 1
+    assert pkgs[0]["ecosystem"] == "npm"
+    assert pkgs[0]["name"] == "evil-pkg"
+    assert pkgs[0]["version"] == "1.0.0"
+    assert pkgs[0]["images"][0]["image"] == "evil/a"
+
+
+def test_packages_groups_same_package_across_images(db):
+    hit = {"ecosystem": "pypi", "name": "bad-lib", "version": "2.0"}
+    _confirmed(db, "evil/a", evidence={"sbom_hits": [hit]})
+    _confirmed(db, "evil/b", evidence={"sbom_hits": [hit]})
+    pkgs = _packages(db)
+    assert len(pkgs) == 1
+    assert {im["image"] for im in pkgs[0]["images"]} == {"evil/a", "evil/b"}
+
+
+def test_packages_different_versions_are_distinct_entries(db):
+    _confirmed(db, "evil/a", evidence={"sbom_hits": [
+        {"ecosystem": "npm", "name": "evil-pkg", "version": "1.0.0"}]})
+    _confirmed(db, "evil/b", evidence={"sbom_hits": [
+        {"ecosystem": "npm", "name": "evil-pkg", "version": "2.0.0"}]})
+    pkgs = _packages(db)
+    assert len(pkgs) == 2
+
+
+def test_packages_sorted_by_image_count_descending(db):
+    hit_a = {"ecosystem": "npm", "name": "popular-bad", "version": "1.0"}
+    hit_b = {"ecosystem": "npm", "name": "rare-bad", "version": "1.0"}
+    _confirmed(db, "evil/a", evidence={"sbom_hits": [hit_a]})
+    _confirmed(db, "evil/b", evidence={"sbom_hits": [hit_a]})
+    _confirmed(db, "evil/c", evidence={"sbom_hits": [hit_b]})
+    pkgs = _packages(db)
+    assert pkgs[0]["name"] == "popular-bad"
+    assert pkgs[1]["name"] == "rare-bad"
+
+
+def test_packages_includes_non_confirmed_findings_too(db):
+    """A package's malicious dependency is real evidence regardless of the
+    carrying image's own status (screened/rejected images still carry proof
+    an operator may want to see)."""
+    f = ImageFinding(
+        image="evil/screened", status=FindingStatus.SCREENED,
+        detection_method=DetectionMethod.HUB_SEARCH, publisher="evil",
+        evidence={"sbom_hits": [{"ecosystem": "npm", "name": "x", "version": "1"}]})
+    db.upsert_finding(f, "run-1")
+    pkgs = _packages(db)
+    assert len(pkgs) == 1
+    assert pkgs[0]["images"][0]["status"] == "screened"
